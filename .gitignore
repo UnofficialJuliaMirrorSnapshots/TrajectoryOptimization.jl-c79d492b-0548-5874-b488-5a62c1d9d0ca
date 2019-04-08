@@ -1,0 +1,11 @@
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+.ipynb_checkpoints
+.vscode
+deps/deps.jl
+*.out
+*.DS_Store
+ipopt.opt
+ipopt.out
+temp/
