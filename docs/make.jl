@@ -4,13 +4,23 @@ using RigidBodyDynamics
 
 makedocs(
     sitename = "TrajectoryOptimization",
-    format = :html,
-    modules = [TrajectoryOptimization]
+    format = Documenter.HTML(),
+    modules = [TrajectoryOptimization],
+    devbranch = "restructure",
+    pages = [
+        "index.md",
+        "models.md",
+        "costfunctions.md",
+        "constraints.md",
+        "problem.md",
+        "solvers.md"
+    ]
 )
 
 # Documenter can also automatically deploy documentation to gh-pages.
 # See "Hosting Documentation" and deploydocs() in the Documenter manual
 # for more information.
 deploydocs(
-    repo = "github.com/RoboticExplorationLab/TrajectoryOptimization.jl.git"
+    repo = "github.com/RoboticExplorationLab/TrajectoryOptimization.jl.git",
+    devbranch = "restructure",
 )

@@ -1,512 +1,503 @@
-"""
-$(SIGNATURES)
-    Get true number of constraints, accounting for minimum time and infeasible start constraints
-    -p: total number of stage constraints (state and control)
-    -pI: number of inequality stage constraints (state and control)
-    -pE: number of equality stage constraints (stage and control)
-"""
-function get_num_constraints(solver::Solver,set::Symbol=:all)
-    if solver.state.constrained
-        if set == :custom
-            pI = solver.obj.pI_custom
-            pE = solver.obj.pE_custom
-            p = pI + pE
-        else
-            if solver.obj isa ConstrainedObjective
-                p = solver.obj.p
-                pI = solver.obj.pI
-                pE = p - pI
-            else
-                p,pI,pE = 0,0,0
-            end
-            if is_min_time(solver)
-                pI += 2
-                pE += 1
-            end
-            solver.state.infeasible ? pE += solver.model.n : nothing
-            p = pI + pE
-        end
-        return p, pI, pE
+using PartedArrays, Test, ForwardDiff
+using BenchmarkTools
+using DocStringExtensions
+
+abstract type ConstraintType end
+abstract type Equality <: ConstraintType end
+abstract type Inequality <: ConstraintType end
+abstract type Null <: ConstraintType end
+
+abstract type GeneralConstraint end
+abstract type AbstractConstraint{S<:ConstraintType} <: GeneralConstraint end
+
+import Base.+
+function +(C::Vector{<:GeneralConstraint}, con::GeneralConstraint)
+    C_ = append!(GeneralConstraint[], C)
+    push!(C_, con)
+end
+
+function +(C::Vector{<:GeneralConstraint}, C2::Vector{<:GeneralConstraint})
+    C_ = append!(GeneralConstraint[], C)
+    append!(C_, C2)
+end
++(con1::GeneralConstraint, con2::GeneralConstraint) = [con1] + con2
+
+"$(SIGNATURES) Return the type of the constraint (Inequality or Equality)"
+type(::AbstractConstraint{S}) where S = S
+
+
+function con_methods(f::Function)
+    term = hasmethod(f, (AbstractVector, AbstractVector))
+    stage = hasmethod(f, (Vector, Vector, Vector))
+    if term && stage
+        :all
+    elseif stage
+        :stage
+    elseif term
+        :terminal
     else
-        return 0,0,0
+        ArgumentError("The function doesn't match the expected signatures")
     end
 end
 
-function get_num_terminal_constraints(solver::Solver,set::Symbol=:all)
-    if solver.state.constrained
-        if set == :custom
-            pI_N = solver.obj.pI_N_custom
-            pE_N = solver.obj.pE_N_custom
-            p_N = pI_N + pE_N
-        else
-            if solver.obj isa ConstrainedObjective
-                p_N = solver.obj.p_N
-                pI_N = solver.obj.pI_N
-
-                pE_N = p_N - pI_N
-            else
-                p_N,pI_N,pE_N = 0,0,0
-            end
+"$(TYPEDEF) General nonlinear constraint"
+struct Constraint{S} <: AbstractConstraint{S}
+    c::Function
+    ∇c::Function
+    p::Int
+    label::Symbol
+    inds::Vector{Vector{Int}}
+    type::Symbol
+    function Constraint{S}(c::Function, ∇c::Function, p::Int, label::Symbol,
+            inds::Vector{Vector{Int}}, type::Symbol) where S <: ConstraintType
+        if type ∉ [:all,:stage,:terminal]
+            ArgumentError(string(type) * " is not a supported constraint type")
         end
-        return p_N,pI_N,pE_N
-    else
-        return 0,0,0
+        new{S}(c,∇c,p,label,inds,type)
     end
 end
 
+"$(TYPEDEF) Create a stage-wise constraint, using ForwardDiff to generate the Jacobian"
+function Constraint{S}(c::Function, n::Int, m::Int, p::Int, label::Symbol;
+        inds=[collect(1:n), collect(1:m)], term=con_methods(c)) where S<:ConstraintType
+    ∇c,c_aug = generate_jacobian(c,n,m,p)
+    Constraint{S}(c, ∇c, p, label, inds, term)
+end
+
+"Create a terminal constraint using ForwardDiff"
+function Constraint{S}(c::Function, n::Int, p::Int, label::Symbol;
+        inds=[collect(1:n), collect(1:m)], term=:terminal) where S<:ConstraintType
+    m = 0
+    ∇c,c_aug = generate_jacobian(c,n,m,p)
+    Constraint{S}(c, ∇c, p, label, inds, term)
+end
+
+"$(TYPEDEF) Create a constraint, providing an analytical Jacobian"
+function Constraint{S}(c::Function, ∇c::Function, n::Int, m::Int, p::Int, label::Symbol;
+        inds=[collect(1:n), collect(1:m)], term=con_methods(c)) where S<:ConstraintType
+    Constraint{S}(c, ∇c, p, label, inds, term)
+end
+
+"Create a terminal constraint with analytical Jacobian"
+function Constraint{S}(c::Function, ∇c::Function, n::Int, p::Int, label::Symbol;
+        inds=[collect(1:n), collect(1:0)], term=:terminal) where S<:ConstraintType
+    Constraint{S}(c, ∇c, p, label, inds, term)
+end
+
+function Constraint()
+    Constraint{Null}(x->nothing, x->nothing, 0, 0, 0, :null, term)
+end
+
+evaluate!(v::AbstractVector, con::Constraint, x::AbstractVector, u::AbstractVector) = is_stage(con) ? con.c(v, x, u) : nothing
+evaluate!(v::AbstractVector, con::Constraint, x::AbstractVector) = is_terminal(con) ? con.c(v,x) : nothing
+jacobian!(V::AbstractMatrix, con::Constraint, x::AbstractVector, u::AbstractVector) = is_stage(con) ? con.∇c(V, x, u) : nothing
+jacobian!(V::AbstractMatrix, con::Constraint, x::AbstractVector) = is_terminal(con) ? con.∇c(V,x) : nothing
+
+is_terminal(con::Constraint) = con.type != :stage
+is_stage(con::Constraint) = con.type != :terminal
+function Base.length(con::Constraint, type=:stage)
+    if type == :stage && is_stage(con)
+        return con.p
+    elseif type == :terminal && is_terminal(con)
+        return con.p
+    else
+        return 0
+    end
+end
+
+
+"$(SIGNATURES) Linear bound constraint on states and controls"
+struct BoundConstraint{T} <: AbstractConstraint{Inequality}
+    x_max::Vector{T}
+    x_min::Vector{T}
+    u_max::Vector{T}
+    u_min::Vector{T}
+    label::Symbol
+    active::NamedTuple{(:x_max, :u_max, :x_min, :u_min, :all),NTuple{5,BitArray{1}}}
+    inds::Vector{Vector{Int}}
+    part::NamedTuple{(:x_max, :u_max, :x_min, :u_min),NTuple{4,UnitRange{Int64}}}
+end
+
+"""$(SIGNATURES) Create a stage bound constraint
+Will default to bounds at infinity. "trim" will remove any bounds at infinity from the constraint function.
+"""
+function BoundConstraint(n::Int,m::Int; x_min=ones(n)*-Inf, x_max=ones(n)*Inf,
+                                        u_min=ones(m)*-Inf, u_max=ones(m)*Inf, trim::Bool=true)
+     # Validate bounds
+     u_max, u_min = _validate_bounds(u_max,u_min,m)
+     x_max, x_min = _validate_bounds(x_max,x_min,n)
+
+     # Specify stacking
+     part = create_partition((n,m,n,m),(:x_max,:u_max,:x_min,:u_min))
+
+     # Pre-allocate jacobian
+     jac_bnd = [Diagonal(I,n+m); -Diagonal(I,n+m)]
+     jac_A = view(jac_bnd,:,part.x_max)
+     jac_B = view(jac_bnd,:,part.u_max)
+
+     inds2 = [collect(1:n), collect(1:m)]
+
+     # Specify which controls and states get used  TODO: Allow this as an input
+
+     if trim
+         active = (x_max=isfinite.(x_max),u_max=isfinite.(u_max),
+                   x_min=isfinite.(x_min),u_min=isfinite.(u_min))
+         lengths = [count(val) for val in values(active)]
+         part = create_partition(Tuple(lengths),keys(active))
+
+         active_all = vcat(values(active)...)
+         active = merge(active, (all=active_all,))
+         ∇c_trim(C,x,u) = copyto!(C,jac_bnd[active_all,:])
+     else
+         active = (x_max=trues(n),u_max=trues(m),
+                   x_min=trues(n),u_min=trues(m),
+                   all=trues(2(n+m)))
+     end
+     return BoundConstraint(x_max, x_min, u_max, u_min, :bound, active, inds2, part)
+end
+
+function combine(bnd1::BoundConstraint, bnd2::BoundConstraint)
+    n1,m1 = length(bnd1.x_max), length(bnd1.u_max)
+    n2,m2 = length(bnd2.x_max), length(bnd2.u_max)
+    bnd = BoundConstraint(n1+n2, m1+m2,
+                          x_max=[bnd1.x_max; bnd2.x_max],
+                          x_min=[bnd1.x_min; bnd2.x_min],
+                          u_max=[bnd1.u_max; bnd2.u_max],
+                          u_min=[bnd1.u_min; bnd2.u_min])
+end
+
+Base.vcat(bnd1::BoundConstraint, bnd2::BoundConstraint) = combine(bnd1, bnd2)
+
+function evaluate!(v::AbstractVector, bnd::BoundConstraint, x::AbstractVector, u::AbstractVector)
+    inds = bnd.part
+    active = bnd.active
+    v[inds.x_max] = (x - bnd.x_max)[active.x_max]
+    v[inds.u_max] = (u - bnd.u_max)[active.u_max]
+    v[inds.x_min] = (bnd.x_min - x)[active.x_min]
+    v[inds.u_min] = (bnd.u_min - u)[active.u_min]
+end
+
+function evaluate!(v::AbstractVector, bnd::BoundConstraint, x::AbstractVector)
+    inds = bnd.part
+    active = bnd.active
+    m = count(active.u_max)
+    v[inds.x_max     ] = (x - bnd.x_max)[active.x_max]
+    v[inds.x_min .- m] = (bnd.x_min - x)[active.x_min]
+end
+
+function jacobian!(V::AbstractMatrix, bnd::BoundConstraint, x::AbstractVector, u::AbstractVector)
+    n,m = length(bnd.x_max), length(bnd.u_max)
+    copyto!(V, [Diagonal(I,n+m); -Diagonal(I,n+m)][bnd.active.all,:])
+end
+
+function jacobian!(V::AbstractMatrix, bnd::BoundConstraint, x::AbstractVector)
+    n = length(bnd.x_max)
+    active = bnd.active
+    copyto!(V, [Diagonal(I,n)[active.x_max,:]; -Diagonal(I,n)[active.x_min,:]])
+end
+
+
+function Base.length(bnd::BoundConstraint, type=:stage)
+    n,m = length(bnd.x_max), length(bnd.u_max)
+    if type == :stage
+        count(bnd.active.all)
+    elseif type == :terminal
+        count(bnd.active.x_max) + count(bnd.active.x_min)
+    end
+end
+
+is_terminal(::BoundConstraint) = true
+is_stage(::BoundConstraint) = true
+
+
+
 """
 $(SIGNATURES)
-Evalutes all inequality and equality constraints (in place) for the current
-state and control trajectories
-    see: A Novel Augmented Lagrangian Approach for Inequalities and Convergent
-    Any-Time Non-Central Updates (Toussaint)
+Check max/min bounds for state and control.
+
+Converts scalar bounds to vectors of appropriate size and checks that lengths
+are equal and bounds do not result in an empty set (i.e. max > min).
+
+# Arguments
+* n: number of elements in the vector (n for states and m for controls)
 """
-function update_constraints!(res::ConstrainedIterResults, solver::Solver, X=res.X, U=res.U)::Nothing
-    n,m,N = get_sizes(solver)
-    p,pI,pE = get_num_constraints(solver)
-    p_N,pI_N,pE_N = get_num_terminal_constraints(solver)
-    m̄,mm = get_num_controls(solver)
-    n̄,nn = get_num_states(solver)
+function _validate_bounds(max,min,n::Int)
 
-    # c_fun = solver.c_fun
-    c_fun = constraint_function(solver)
+    if min isa Real
+        min = ones(n)*min
+    end
+    if max isa Real
+        max = ones(n)*max
+    end
+    if length(max) != length(min)
+        throw(DimensionMismatch("u_max and u_min must have equal length"))
+    end
+    if ~all(max .> min)
+        throw(ArgumentError("u_max must be greater than u_min"))
+    end
+    if length(max) != n
+        throw(DimensionMismatch("limit of length $(length(max)) doesn't match expected length of $n"))
+    end
+    return max, min
+end
 
+
+
+function goal_constraint(xf::Vector{T}) where T
+    n = length(xf)
+    terminal_constraint(v,xN) = copyto!(v,xN-xf)
+    terminal_jacobian(C,xN) = copyto!(C,Diagonal(I,n))
+    Constraint{Equality}(terminal_constraint, terminal_jacobian, n, :goal, [collect(1:n),collect(1:0)], :terminal)
+end
+
+function infeasible_constraints(n::Int, m::Int)
+    idx_inf = (n+m) .+ (1:n)
+    u_inf = m .+ (1:n)
+    ∇inf = zeros(n,2n+m)
+    ∇inf[:,idx_inf] = Diagonal(1.0I,n)
+    inf_con(v,x,u) = copyto!(v, u)
+    inf_jac(C,x,u) = copyto!(C, ∇inf)
+    Constraint{Equality}(inf_con, inf_jac, n, :infeasible, [collect(1:n), collect(u_inf)], :stage)
+end
+
+
+
+# function generate_jacobian(f!::Function,n::Int,p::Int=n)
+#     ∇f!(A,v,x) = ForwardDiff.jacobian!(A,f!,v,x)
+#     return ∇f!, f!
+# end
+
+########################
+#   Constraint Sets    #
+########################
+ConstraintSet = Vector{<:GeneralConstraint}
+
+"$(SIGNATURES) Count the number of inequality and equality constraints in a constraint set.
+Returns the sizes of the constraint vector, not the number of constraint types."
+function count_constraints(C::ConstraintSet)
+    pI = 0
+    pE = 0
+    for c in C
+        if c isa AbstractConstraint{Equality}
+            pE += length(c)
+        elseif c isa AbstractConstraint{Inequality}
+            pI += length(c)
+        end
+    end
+    return pI,pE
+end
+
+"$(SIGNATURES) Split a constraint set into sets of inequality and equality constraints"
+function Base.split(C::ConstraintSet)
+    E = AbstractConstraint{Equality}[]
+    I = AbstractConstraint{Inequality}[]
+    for c in C
+        if c isa AbstractConstraint{Equality}
+            push!(E,c)
+        elseif c isa AbstractConstraint{Inequality}
+            push!(I,c)
+        end
+    end
+    return I,E
+end
+
+function RigidBodyDynamics.num_constraints(C::ConstraintSet,type=:stage)
+    if !isempty(C)
+        return sum(length.(C,type))
+    else
+        return 0
+    end
+end
+
+labels(C::ConstraintSet) = [c.label for c in C]
+inequalities(C::ConstraintSet) = filter(x->isa(x,AbstractConstraint{Inequality}),C)
+equalities(C::ConstraintSet) = filter(x->isa(x,AbstractConstraint{Equality}),C)
+bounds(C::ConstraintSet) = filter(x->isa(x,BoundConstraint),C)
+Base.findall(C::ConstraintSet,T::Type) = isa.(C,AbstractConstraint{T})
+terminal(C::ConstraintSet) = filter(is_terminal,C)
+stage(C::ConstraintSet) = filter(is_stage,C)
+function remove_bounds!(C::ConstraintSet)
+    bnds = bounds(C)
+    filter!(x->!isa(x,BoundConstraint),C)
+    return bnds
+end
+function Base.pop!(C::ConstraintSet, label::Symbol)
+    con = filter(x->x.label==label,C)
+    filter!(x->x.label≠label,C)
+    return con[1]
+end
+
+function PartedArrays.create_partition(C::ConstraintSet,contype=:stage)
+    if !isempty(C)
+        lens = length.(C,contype)
+        part = create_partition(Tuple(lens),Tuple(labels(C)))
+        ineq = PartedArray(trues(sum(lens)),part)
+        for (i,c) in enumerate(C)
+            if type(c) == Equality
+                copyto!(ineq[c.label], falses(lens[i]))
+            end
+        end
+        part_IE = (inequality=LinearIndices(ineq)[ineq],equality=LinearIndices(ineq)[.!ineq])
+        return merge(part,part_IE)
+    else
+        return NamedTuple{(:equality,:inequality)}((1:0,1:0))
+    end
+end
+
+function PartedArrays.create_partition2(C::ConstraintSet,n::Int,m::Int,contype=:stage)
+    if !isempty(C)
+        lens = Tuple(length.(C,contype))
+        names = Tuple(labels(C))
+        p = num_constraints(C,contype)
+        part1 = create_partition(lens,names)
+        contype == :stage ? m = m : m = 0
+        part2 = NamedTuple{names}([(rng,1:n+m) for rng in part1])
+        part_xu = (x=(1:p,1:n),u=(1:p,n+1:n+m))
+        return merge(part2,part_xu)
+    else
+        return NamedTuple{(:x,:u)}(((1:0,1:n),(1:0,n+1:n+m)))
+    end
+end
+
+PartedArrays.PartedVector(C::ConstraintSet, type=:stage) = PartedVector(Float64,C,type)
+PartedArrays.PartedVector(T::Type,C::ConstraintSet, type=:stage) = PartedArray(zeros(T,num_constraints(C,type)), create_partition(C,type))
+PartedArrays.PartedMatrix(C::ConstraintSet,n::Int,m::Int, type=:stage) = PartedMatrix(Float64, C, n, m, type)
+PartedArrays.PartedMatrix(T::Type,C::ConstraintSet,n::Int,m::Int, type=:stage) = PartedArray(zeros(T,num_constraints(C,type),n+m*(type==:stage)), create_partition2(C,n,m,type))
+
+num_stage_constraints(C::ConstraintSet) = num_constraints(stage(C),:stage)
+num_terminal_constraints(C::ConstraintSet) = num_constraints(terminal(C),:terminal)
+
+
+"$(SIGNATURES) Evaluate the constraint function for all the constraint functions in a set"
+function evaluate!(c::PartedVector, C::ConstraintSet, x, u)
+    for con in stage(C)
+        evaluate!(c[con.label], con, x[con.inds[1]], u[con.inds[2]])
+    end
+end
+
+"$(SIGNATURES) Evaluate the constraint function for all the terminal constraint functions in a set"
+function evaluate!(c::PartedVector, C::ConstraintSet, x)
+    for con in terminal(C)
+        evaluate!(c[con.label], con, x[con.inds[1]])
+    end
+end
+
+function jacobian!(c::PartedMatrix, C::ConstraintSet, x, u)
+    for con in stage(C)
+        jacobian!(c[con.label], con, x, u)
+    end
+end
+
+function jacobian!(c::PartedMatrix, C::ConstraintSet, x)
+    for con in terminal(C)
+        jacobian!(c[con.label], con, x)
+    end
+end
+
+
+"Return a new constraint set with modified jacobians--useful for state augmented problems"
+function update_constraint_set_jacobians(cs::ConstraintSet,n::Int,n̄::Int,m::Int)
+    idx = [collect(1:n); collect(1:m) .+ n̄]
+    _cs = GeneralConstraint[]
+
+    cs_ = copy(cs)
+    bnd = remove_bounds!(cs_)
+    for con in cs_
+        _∇c(C,x,u) = con.∇c(view(C,:,idx),x,u)
+        _∇c(C,x) = con.∇c(C,x)
+        _cs += Constraint{type(con)}(con.c,_∇c,n,m,con.p,con.label,inds=con.inds)
+    end
+
+    _cs += bnd
+
+    return _cs
+end
+
+# "Type that stores a trajectory of constraint sets"
+struct ProblemConstraints
+    C::Vector{<:ConstraintSet}
+end
+
+function ProblemConstraints(C::ConstraintSet,N::Int)
+    C = append!(GeneralConstraint[], C)
+    ProblemConstraints([copy(C) for k = 1:N])
+end
+
+function ProblemConstraints(C::ConstraintSet,C_term::ConstraintSet,N::Int)
+    C = append!(GeneralConstraint[], C)
+    ProblemConstraints([k < N ? [C...,TerminalConstraint()] : [Constraint(),C_term...] for k = 1:N])
+end
+
+function ProblemConstraints(C::Vector{<:ConstraintSet},C_term::ConstraintSet)
+    ProblemConstraints([C...,[Constraint(),C_term...]])
+end
+
+function ProblemConstraints(N::Int)
+    ProblemConstraints([GeneralConstraint[] for k = 1:N])
+end
+
+function ProblemConstraints()
+    ProblemConstraints(ConstraintSet[])
+end
+
+num_stage_constraints(pcon::ProblemConstraints) = map(num_stage_constraints, pcon.C)
+num_terminal_constraints(pcon::ProblemConstraints) = map(num_terminal_constraints, pcon.C)
+function TrajectoryOptimization.num_constraints(pcon::ProblemConstraints)::Vector{Int}
+    p = map(num_stage_constraints, pcon.C)
+    p[end] = num_terminal_constraints(pcon.C[end])
+    return p
+end
+
+Base.setindex!(pcon::ProblemConstraints, C::ConstraintSet, k::Int) = pcon.C[k] = C
+Base.getindex(pcon::ProblemConstraints,i::Int) = pcon.C[i]
+Base.copy(pcon::ProblemConstraints) = ProblemConstraints(deepcopy(pcon.C))
+Base.length(pcon::ProblemConstraints) = length(pcon.C)
+
+
+"Update constraints trajectories"
+function update_constraints!(C::PartedVecTrajectory{T}, constraints::ProblemConstraints,
+        X::AbstractVectorTrajectory{T}, U::AbstractVectorTrajectory{T}) where T
+    N = length(X)
     for k = 1:N-1
-        # Update constraints
-        c_fun(res.C[k], X[k], U[k])
-
-        # Minimum time special case
-        if solver.state.minimum_time
-            if k == 1
-                res.C[k][p] = 0.0
-            end
-        end
-
-        # Get active constraint set
-        get_active_set!(res,solver,p,pI,k)
-
-        # Update penality-indicator matrices based on active set
-        res.Iμ[k] = Diagonal(res.active_set[k].*res.μ[k])
+        evaluate!(C[k],constraints[k],X[k],U[k])
     end
+    evaluate!(C[N],constraints[N],X[N])
+end
 
-    # Terminal constraint
-    c_fun(res.C[N],X[N][1:n])
-    get_active_set!(res,solver,p_N,pI_N,N)
+function jacobian!(C::PartedMatTrajectory{T}, constraints::ProblemConstraints,
+        X::AbstractVectorTrajectory{T}, U::AbstractVectorTrajectory{T}) where T
+    N = length(X)
+    for k = 1:N-1
+        jacobian!(C[k],constraints[k],X[k],U[k])
+    end
+    jacobian!(C[N],constraints[N],X[N])
+end
 
-    res.Iμ[N] = Diagonal(res.active_set[N].*res.μ[N])
 
+
+###################################
+##         ACTIVE SET            ##
+###################################
+
+"Evaluate active set constraints for entire trajectory"
+function update_active_set!(a::PartedVecTrajectory{Bool},c::PartedVecTrajectory{T},λ::PartedVecTrajectory{T},tol::T=0.0) where T
+    N = length(c)
+    for k = 1:N
+        active_set!(a[k], c[k], λ[k], tol)
+    end
+end
+
+"Evaluate active set constraints for a single time step"
+function active_set!(a::AbstractVector{Bool}, c::AbstractVector{T}, λ::AbstractVector{T}, tol::T=0.0) where T
+    # inequality_active!(a,c,λ,tol)
+    a.equality .= true
+    a.inequality .=  @. (c.inequality >= tol) | (λ.inequality > 0)
     return nothing
 end
 
-function update_constraints!(res::UnconstrainedIterResults, solver::Solver, X=res.X, U=res.U)::Nothing
-    return nothing
-end
-
-"""
-$(SIGNATURES)
-    Determine active set for inequality constraints
-"""
-function get_active_set!(results::ConstrainedIterResults,solver::Solver,p::Int,pI::Int,k::Int)
-    # Inequality constraints
-    for j = 1:pI
-        if active_set_criteria(solver,results.C[k][j], results.λ[k][j], results.μ[k][j])
-            results.active_set[k][j] = true
-        else
-            results.active_set[k][j] = false
-        end
-    end
-    # Equality constraints
-    for j = pI+1:p
-        results.active_set[k][j] = true
-    end
-    return nothing
-end
-
-function active_set_criteria(solver::Solver,c,λ,μ)::Bool
-    if solver.opts.al_type == :default
-        c > -solver.opts.active_constraint_tolerance || λ > 0.0
-    elseif solver.opts.al_type == :algencan
-        λ > 0
-        c > -solver.opts.active_constraint_tolerance || λ > 0.0
-        λ + μ*c > 0
-    else
-        error("al_type $(solver.opts.al_type) not recognized")
-    end
-end
-
-"""
-$(SIGNATURES)
-    Count the number of constraints of each type from an objective
-"""
-function count_constraints(obj::ConstrainedObjective, constraints::Symbol=:all)
-    n,m = get_sizes(obj)
-    p = obj.p # number of constraints
-    pI = obj.pI # number of inequality and equality constraints
-    pE = p-pI # number of equality constraints
-
-    pI_c = obj.pI_custom
-    pE_c = obj.pE_custom
-
-    # Terminal constraints
-    p_N = obj.p_N
-    pI_N = obj.pI_N
-    pE_N = p_N - pI_N
-
-    pI_N_c = obj.pI_N_custom
-    pE_N_c = obj.pE_N_custom
-
-    if constraints == :all
-        return (pI, pI_c, pI_N, pI_N_c), (pE, pE_c, pE_N, pE_N_c)
-    elseif constraints == :custom
-        return (pI_c, pI_N_c), (pE_c, pE_N_c)
-    elseif constraints == :total
-        return (pI, pI_N), (pE, pE_N)
-    end
-
-end
-
-"""
-$(SIGNATURES)
-    Generate the Jacobian of a general nonlinear constraint function
-        -constraint function must be inplace
-        -automatic differentition via ForwardDiff.jl
-"""
-function generate_general_constraint_jacobian(c::Function,p::Int,n::Int64,m::Int64)::Function
-    c_aug! = f_augmented!(c,n,m)
-    J = zeros(p,n+m)
-    S = zeros(n+m)
-    cdot = zeros(p)
-    F(J,cdot,S) = ForwardDiff.jacobian!(J,c_aug!,cdot,S)
-
-    function c_jacobian(cx,cu,x,u)
-        S[1:n] = x[1:n]
-        S[n+1:n+m] = u[1:m]
-        F(J,cdot,S)
-        cx[1:p,1:n] = J[1:p,1:n]
-        cu[1:p,1:m] = J[1:p,n+1:n+m]
-    end
-    return c_jacobian
-end
-
-function generate_general_constraint_jacobian(c::Function,p::Int,n::Int64)::Function
-    J_N = zeros(p,n)
-    xdot = zeros(p)
-    F_N(J_N,xdot,x) = ForwardDiff.jacobian!(J_N,c,xdot,x) # NOTE: terminal constraints can only be dependent on state x_N
-    function c_jacobian(cx,x)
-        F_N(J_N,xdot,x)
-        cx .= J_N
-    end
-    return c_jacobian
-end
-
-
-"""
-$(SIGNATURES)
-Generate the constraints function C(x,u) and a function to compute the jacobians
-Cx, Cu = Jc(x,u) from a `ConstrainedObjective` type. Automatically stacks inequality
-and equality constraints and takes jacobians of custom functions with `ForwardDiff`.
-Stacks the constraints as follows:
-
-[upper control inequalities
- (√dt upper bound)
- lower control inequalities
- (√dt lower bound)
- upper state inequalities
- lower state inequalities
- general inequalities
- general equalities
- (control equalities for infeasible start)
- (dt equality)]
-"""
-function generate_constraint_functions(obj::ConstrainedObjective; max_dt::Float64=1.0, min_dt::Float64=1e-2)
-    n,m = get_sizes(obj)
-
-    # Key: I=> inequality,   E=> equality
-    #     _c=> custom   (lack)=> box constraint
-    #     _N=> terminal (lack)=> stage
-
-    min_time = obj.tf == 0
-
-    p = obj.p # number of constraints
-    pI, pI_c, pI_N, pI_N_c = obj.pI, obj.pI_custom, obj.pI_N, obj.pI_N_custom
-    pE, pE_c, pE_N, pE_N_c = p-obj.pI, obj.pE_custom, obj.p_N - obj.pI_N, obj.pE_N_custom
-    m̄ = m
-    n̄ = n
-    if min_time
-         m̄ += 1
-         n̄ += 1
-    end
-    labels = String[]
-
-    # Append on min time bounds
-    u_max = obj.u_max
-    u_min = obj.u_min
-    if min_time
-        u_max = [u_max; sqrt(max_dt)]
-        u_min = [u_min; sqrt(min_dt)]
-    end
-
-    # Mask for active (state|control) constraints
-    u_min_active = isfinite.(u_min)
-    u_max_active = isfinite.(u_max)
-    x_min_active = isfinite.(obj.x_min)
-    x_max_active = isfinite.(obj.x_max)
-
-    # Inequality on control
-    pI_u_max = count(u_max_active)
-    pI_u_min = count(u_min_active)
-    pI_u = pI_u_max + pI_u_min
-    function c_control_limits!(c,x,u)
-        c[1:pI_u_max] = (u[1:m̄] - u_max)[u_max_active]
-        c[pI_u_max+1:pI_u_max+pI_u_min] = (u_min - u[1:m̄])[u_min_active]
-    end
-
-    lbl_u_min = ["control (lower bound)" for i = 1:pI_u_min]
-    lbl_u_max = ["control (upper bound)" for i = 1:pI_u_max]
-    if min_time
-        lbl_u_min[end] = "* √dt (lower bound)"
-        lbl_u_max[end] = "* √dt (upper bound)"
-    end
-
-    # Inequality on state
-    pI_x_max = count(x_max_active)
-    pI_x_min = count(x_min_active)
-    pI_x = pI_x_max + pI_x_min
-    function c_state_limits!(c,x,u)
-        c[1:pI_x_max] = (x[1:n] - obj.x_max )[x_max_active]
-        c[pI_x_max+1:pI_x_max+pI_x_min] = (obj.x_min - x[1:n])[x_min_active]
-    end
-    lbl_x_max = ["state (upper bound)" for i = 1:pI_x_max]
-    lbl_x_min = ["state (lower bound)" for i = 1:pI_x_min]
-
-    # Update pI
-    pI = pI_x + pI_u + pI_c
-
-    # Form inequality constraint
-    function cI!(c,x,u)
-        c_control_limits!(view(c,1:pI_u),x,u)
-        c_state_limits!(view(c,(1:pI_x).+pI_u),x,u)
-        if pI_c > 0
-            obj.cI(view(c,(1:pI_c).+pI_u.+pI_x),x,u)
-        end
-    end
-    lbl_cI = ["custom inequality" for i = 1:pI_c]
-    lbl_cE = ["custom equality" for i = 1:pE_c]
-
-    function cI!(c,x)
-        if obj.use_xf_equality_constraint
-            nothing
-        else
-            if pI_x_max > 0
-                c[1:pI_x_max] = (x[1:n] - obj.x_max )[x_max_active]
-            end
-            if pI_x_min > 0
-                c[pI_x_max .+ (1:pI_x_min)] = (obj.x_min - x[1:n])[x_min_active]
-            end
-            if obj.pI_N_custom > 0
-                c[pI_x .+ (1:obj.pI_N_custom)] = obj.cI_N(c,x[1:n])
-            end
-        end
-    end
-
-    # Construct labels
-    c_labels = [lbl_u_max; lbl_u_min; lbl_x_max; lbl_x_min; lbl_cI; lbl_cE]
-
-
-    # Augment functions together
-    function c_function!(c,x,u)::Nothing
-        infeasible = length(u) != m̄
-        if pI > 0
-            cI!(view(c,1:pI),x,u[1:m̄])
-        end
-        if pE_c > 0
-            obj.cE(view(c,(1:pE_c).+pI),x,u[1:m])
-        end
-        if infeasible
-            c[pI.+pE_c.+(1:n)] = u[m̄.+(1:n)]
-        end
-        if min_time
-            c[pI+pE_c+(n*infeasible)+1] = u[m̄] - x[n̄]
-        end
-        return nothing
-    end
-
-    # Terminal Constraint
-    """
-    [xN-xf]
-    or
-    [x - x_max
-     x_min - x
-     cI_N_custom
-     cI_E_custom]
-    """
-    function c_function!(c,x)
-        if obj.use_xf_equality_constraint
-            c[1:n] = x - obj.xf
-        else
-            if pI_x_max > 0
-                c[1:pI_x_max] = (x[1:n] - obj.x_max)[x_max_active]
-            end
-            if pI_x_min > 0
-                c[pI_x_max .+ (1:pI_x_min)] = (obj.x_min - x[1:n])[x_min_active]
-            end
-            if obj.pI_N_custom > 0
-                obj.cI_N(view(c,pI_x .+ (1:obj.pI_N_custom)),x[1:n])
-            end
-            if obj.pE_N_custom > 0
-                obj.cE_N(view(c,(obj.pI_N_custom + pI_x) .+ (1:pE_N)),x[1:n])
-            end
-        end
-    end
-
-    ### Jacobians ###
-    # Declare known Jacobians
-    In = Matrix(I,n,n)
-    cx_control_limits = zeros(pI_u,n)
-    cx_state_limits = zeros(pI_x,n)
-    cx_state_limits[1:pI_x_max, :] = In[x_max_active,:]
-    cx_state_limits[pI_x_max+1:end,:] = -In[x_min_active,:]
-
-    Im = Matrix(I,m̄,m̄)
-    cu_control_limits = zeros(pI_u,m̄)
-    cu_control_limits[1:pI_u_max,:] = Im[u_max_active,:]
-    cu_control_limits[pI_u_max+1:end,:] = -Im[u_min_active,:]
-    cu_state_limits = zeros(pI_x,m̄)
-
-    if pI_c > 0
-        cI_custom_jacobian! = generate_general_constraint_jacobian(obj.cI, pI_c, n, m)
-    end
-    if pE_c > 0
-        cE_custom_jacobian! = generate_general_constraint_jacobian(obj.cE, pE_c, n, m)
-    end
-
-    cx_infeasible = zeros(n,n)
-    cu_infeasible = In
-
-    function c_jacobian!(cx::AbstractMatrix, cu::AbstractMatrix, x::AbstractArray,u::AbstractArray)
-        infeasible = length(u) != m̄
-        let m = m̄
-            cx[1:pI_u, 1:n] = cx_control_limits
-            cx[(1:pI_x).+pI_u, 1:n] = cx_state_limits
-
-            cu[1:pI_u, 1:m] = cu_control_limits
-            cu[(1:pI_x).+pI_u, 1:m] = cu_state_limits
-        end
-
-        if pI_c > 0
-            cI_custom_jacobian!(view(cx,pI_x+pI_u+1:pI_x+pI_u+pI_c,1:n), view(cu,pI_x+pI_u+1:pI_x+pI_u+pI_c,1:m), x, u[1:m])
-        end
-        if pE_c > 0
-            cE_custom_jacobian!(view(cx,pI_x+pI_u+pI_c+1:pI_x+pI_u+pI_c+pE_c,1:n), view(cu,pI_x+pI_u+pI_c+1:pI_x+pI_u+pI_c+pE_c,1:m), x, u[1:m])
-        end
-
-        if infeasible
-            cx[pI+pE_c+1:pI+pE_c+n,1:n] = cx_infeasible
-            cu[pI+pE_c+1:pI+pE_c+n,m̄+1:m̄+n] = cu_infeasible
-        end
-        if min_time
-            cx[pI+pE_c+(n*infeasible)+1,n̄] = -1.0
-            cu[pI+pE_c+(n*infeasible)+1,m̄] = 1.0
-        end
-    end
-
-    # Terminal Constraint
-    """
-    [In
-     -In
-    JI_N_custom;
-     In;
-     JI_E_custom]
-    """
-
-    if obj.pI_N_custom > 0
-        cI_N_custom_jacobian! = generate_general_constraint_jacobian(obj.cI_N, obj.pI_N_custom, n)
-    end
-    if obj.pE_N_custom > 0
-        cE_N_custom_jacobian! = generate_general_constraint_jacobian(obj.cE_N, obj.pE_N_custom, n)
-    end
-
-    function c_jacobian!(j::AbstractArray,x::AbstractArray)
-        if obj.use_xf_equality_constraint
-            j[1:n,1:n] = In
-        else
-            if pI_x_max > 0
-                j[1:pI_x_max,1:n] = In[x_max_active,:]
-            end
-            if pI_x_min > 0
-                j[pI_x_max .+ (1:pI_x_min),1:n] = -In[x_min_active,:]
-            end
-            if obj.pI_N_custom > 0
-                cI_N_custom_jacobian!(view(j,pI_x .+(1:obj.pI_N_custom),1:n),x[1:n])
-            end
-            if obj.pE_N_custom > 0
-                cE_N_custom_jacobian!(view(j,(obj.pI_N_custom + pI_x) .+ (1:pE_N),1:n),x[1:n])
-            end
-        end
-    end
-
-    cE!(c,x,u) = obj.cE(c,x,u)
-
-    function cE!(c,x)
-        if obj.use_xf_equality_constraint
-            c[1:n] = x - obj.xf
-        elseif obj.pE_N_custom > 0
-            c[1:pE_N] = obj.cE_N(view(c,1:pE_N),x[1:n])
-        end
-    end
-
-    return c_function!, c_jacobian!, c_labels, cI!, cE!
-end
-
-generate_constraint_functions(obj::UnconstrainedObjective; max_dt::Float64=1.0,min_dt=1.0e-2) = null_constraint, null_constraint_jacobian, String[], null_constraint, null_constraint
-
-"""
-$(SIGNATURES)
-Compute the maximum constraint violation. Inactive inequality constraints are
-not counted (masked by the Iμ matrix).
-"""
-function constraint_ℓ2_norm(results::ConstrainedIterResults)
-    return norm(map((x)->x.>0, results.Iμ) .* results.C)
-end
-
-function contraint_ℓ2_norm(results::UnconstrainedIterResults)
-    return 0.0
-end
-
-"""
-$(SIGNATURES)
-Compute the ℓ2-norm over entire constraint trajectory. Inactive inequality constraints are
-not counted (masked by the Iμ matrix).
-"""
-function max_violation(results::ConstrainedIterResults)
-    return maximum(norm.(map((x)->x.>0, results.Iμ) .* results.C, Inf))
-end
-
-function max_violation(results::UnconstrainedIterResults)
-    return 0.0
-end
-
-
-
-## Simple constraint primitives
-"""
-$(SIGNATURES)
-Circle constraint function (c ⩽ 0, negative is satisfying constraint)
-"""
-function circle_constraint(x,x0,y0,r)
-	return -((x[1]-x0)^2 + (x[2]-y0)^2  - r^2)
-end
-
-circle_constraint(x,c,r) = circle_constraint(x,c[1],c[2],r)
-
-"""
-$(SIGNATURES)
-Sphere constraint function (c ⩽ 0, negative is satisfying constraint)
-"""
-function sphere_constraint(x,x0,y0,z0,r)
-	return -((x[1]-x0)^2 + (x[2]-y0)^2 + (x[3]-z0)^2  - r^2)
-end
-
-function sphere_constraint(x,x0,r)
-	return -((x[1]-x0[1])^2 + (x[2]-x0[2])^2 + (x[3]-x0[3])^2-r^2)
+function active_set(c::AbstractVector{T}, λ::AbstractVector{T}, tol::T=0.0) where T
+    a = PartedArray(trues(length(c)),c.parts)
+    a.equality .= true
+    a.inequality .=  @. (c.inequality >= tol) | (λ.inequality > 0)
+    return a
 end

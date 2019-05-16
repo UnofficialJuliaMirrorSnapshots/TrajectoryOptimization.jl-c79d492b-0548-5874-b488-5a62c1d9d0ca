@@ -1,3 +1,7 @@
+function solve!(prob::Problem{T}, solver::DIRCOLSolver{T}) where T
+
+end
+
 """
 $(SIGNATURES)
 Solve a trajectory optimization problem with direct collocation
@@ -522,6 +526,17 @@ function init_traj_points(solver::Solver,fVal::Matrix,method::Symbol)
     return X_,U_,fVal_
 end
 
+function init_traj_points(prob::Problem,solver::DIRCOLSolver,fVal::Matrix)
+    method = solver.opts.method
+    N,N_ = get_N(prob, solver)
+    n,m = size(prob)
+    X_,U_,fVal_ = zeros(n,N_),zeros(m,N_),zeros(n,N_)
+    if method == :trapezoid || method == :hermite_simpson_separated
+        fVal_ = fVal
+    end
+    return X_,U_,fVal_
+end
+
 
 """
 $(SIGNATURES)
@@ -697,7 +712,7 @@ function collocation_constraints!(solver::Solver, X, U, fVal, g_colloc, method::
         solver.state.minimum_time ? dt = U[m̄:m̄,:] : dt = ones(1,N_)*solver.dt
 
         collocation = - X[:,iUpp] + X[:,iLow] + dt[:,iLow].*(fVal[:,iLow] + 4*fVal[:,iMid] + fVal[:,iUpp])/6
-
+        
         if method == :hermite_simpson
             g .= collocation
         else

@@ -4,7 +4,7 @@ os:
   - linux
   - osx
 julia:
-  - 0.7
+  - 1.1
   # - nightly
 notifications:
   email: false
@@ -24,7 +24,6 @@ addons:
    - gfortran
 #before_script: # homebrew for mac
 #  - if [ $TRAVIS_OS_NAME = osx ]; then brew install gcc; fi
-
 ## uncomment the following lines to override the default test script
 #script:
 #  - julia -e 'Pkg.clone(pwd()); Pkg.build("TrajectoryOptimization"); Pkg.test("TrajectoryOptimization"; coverage=true)'
@@ -35,13 +34,13 @@ after_success:
   - julia -e 'cd(Pkg.dir("TrajectoryOptimization")); Pkg.add("Coverage"); using Coverage; Codecov.submit(Codecov.process_folder())'
 
 
-jobs:
-  include:
-    - stage: "Documentation"
-      julia: 1.0
-      os: linux
-      script:
-        - julia --project=docs/ -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd()));
-                                               Pkg.instantiate()'
-        - julia --project=docs/ docs/make.jl
-      after_success: skip
+# jobs:
+#   include:
+#     - stage: "Documentation"
+#       julia: 1.1
+#       os: linux
+#       script:
+#         - julia --project=docs/ -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd()));
+#                                                Pkg.instantiate()'
+#         - julia --project=docs/ docs/make.jl
+#       after_success: skip
