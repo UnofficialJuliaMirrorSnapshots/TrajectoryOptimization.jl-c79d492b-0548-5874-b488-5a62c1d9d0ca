@@ -1,6 +1,6 @@
 "Create infeasible state trajectory initialization problem from problem"
 function infeasible_problem(prob::Problem{T},R_inf::T=1.0) where T
-    N = prob.N
+    N = prob.N; n = prob.model.n; m = prob.model.m
     @assert all([prob.obj[k] isa QuadraticCost for k = 1:N]) #TODO generic cost
 
     # modify problem with slack control
@@ -21,8 +21,8 @@ function infeasible_problem(prob::Problem{T},R_inf::T=1.0) where T
     con_prob = ConstraintSet[]
     constrained = is_constrained(prob)
     for k = 1:N-1
-        _con = AbstractConstraint[]
-        constrained ? append!(_con,prob.constraints.C[k]) : nothing
+        _con = GeneralConstraint[]
+        constrained ? append!(_con,update_constraint_set_jacobians(prob.constraints.C[k],n,n,m)) : nothing
         push!(_con,con_inf)
         push!(con_prob,_con)
     end
@@ -32,6 +32,7 @@ function infeasible_problem(prob::Problem{T},R_inf::T=1.0) where T
     update_problem(prob,model=model_inf,obj=Objective(obj_inf),
         constraints=ProblemConstraints(con_prob),U=[[prob.U[k];u_slack[k]] for k = 1:prob.N-1])
 end
+
 
 "Return a feasible problem from an infeasible problem"
 function infeasible_to_feasible_problem(prob::Problem{T},prob_altro::Problem{T},
@@ -78,7 +79,7 @@ function slack_controls(prob::Problem{T}) where T
     return u_slack
 end
 
-function line_trajectory(x0::Vector{T},xf::Vector{T},N::Int) where T
+function line_trajectory(x0::Vector,xf::Vector,N::Int)
     t = range(0,stop=N,length=N)
     slope = (xf .- x0)./N
     x_traj = [slope*t[k] for k = 1:N]

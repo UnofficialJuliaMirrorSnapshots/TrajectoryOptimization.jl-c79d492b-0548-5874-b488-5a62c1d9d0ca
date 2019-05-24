@@ -25,15 +25,15 @@ function process_results!(prob::Problem{T},prob_altro::Problem{T},
         return nothing
     else
         # remove infeasible, perform feasible projection, resolve
-        if state.infeasible
-            # infeasible problem -> feasible problem
-            prob_altro = infeasible_to_feasible_problem(prob,prob_altro,state,opts)
-
-            # secondary solve (augmented Lagrangian)
-            if opts.resolve_feasible_problem
-                solve!(prob_altro,opts.opts_al)
-            end
-        end
+        # if state.infeasible
+        #     # infeasible problem -> feasible problem
+        #     prob_altro = infeasible_to_feasible_problem(prob,prob_altro,state,opts)
+        #
+        #     # secondary solve (augmented Lagrangian)
+        #     if opts.resolve_feasible_problem
+        #         solve!(prob_altro,opts.opts_al)
+        #     end
+        # end
 
         # update original problem (minimum time solve will return dt as controls at U[k][end])
         if state.minimum_time
@@ -58,7 +58,7 @@ function altro_problem(prob::Problem{T},opts::ALTROSolverOptions{T}) where T
 
     # create infeasible problem
     if !all(x->isnan(x),prob_altro.X[1])
-        println("Infeasible Solve")
+        @info "Infeasible Solve"
         prob_altro = infeasible_problem(prob_altro,opts.R_inf)
         infeasible = true
     else
@@ -67,7 +67,7 @@ function altro_problem(prob::Problem{T},opts::ALTROSolverOptions{T}) where T
 
     # create minimum time problem
     if prob_altro.tf == 0.0
-        println("Minimum Time Solve")
+        @info "Minimum Time Solve"
         prob_altro = minimum_time_problem(prob_altro,opts.R_minimum_time,
             opts.dt_max,opts.dt_min)
         minimum_time = true
