@@ -28,9 +28,19 @@ struct Expansion{T<:AbstractFloat}
     ux::Matrix{T}
 end
 
-import Base./, Base.*
+function Expansion{T}(n::Int, m::Int) where T
+    x = zeros(T,n)
+    u = zeros(T,m)
+    xx = zeros(T,n,n)
+    uu = zeros(T,m,m)
+    ux = zeros(T,m,n)
+    Expansion{T}(x, u, xx, uu, ux)
+end
 
-function *(e::Expansion{T},a::T) where T
+
+
+import Base./, Base.*
+function *(e::Expansion, a::Real)
     e.x .*= a
     e.u .*= a
     e.xx .*= a
@@ -38,8 +48,9 @@ function *(e::Expansion{T},a::T) where T
     e.ux .*= a
     return nothing
 end
+*(a::Real, e::Expansion) = e*a
 
-function /(e::Expansion{T},a::T) where T
+function /(e::Expansion,a::Real)
     e.x ./= a
     e.u ./= a
     e.xx ./= a
@@ -81,10 +92,10 @@ mutable struct QuadraticCost{T} <: CostFunction
     H::AbstractMatrix{T}                 # Quadratic Cross-coupling for state and controls (n,m)
     q::AbstractVector{T}                 # Linear term on states (n,)
     r::AbstractVector{T}                 # Linear term on controls (m,)
-    c::T                  # constant term
+    c::T                                 # constant term
     Qf::AbstractMatrix{T}                # Quadratic final cost for terminal state (n,n)
-    qf::AbstractVector{T}               # Linear term on terminal state (n,)
-    cf::T                 # constant term (terminal)
+    qf::AbstractVector{T}                # Linear term on terminal state (n,)
+    cf::T                                # constant term (terminal)
     function QuadraticCost(Q::AbstractMatrix{T}, R::AbstractMatrix{T}, H::AbstractMatrix{T},
             q::AbstractVector{T}, r::AbstractVector{T}, c::T, Qf::AbstractMatrix{T},
             qf::AbstractVector{T}, cf::T) where T
@@ -92,6 +103,7 @@ mutable struct QuadraticCost{T} <: CostFunction
             err = ArgumentError("R must be positive definite")
             throw(err)
         end
+        # TODO: needs test
         if !ispossemidef(Q)
             err = ArgumentError("Q must be positive semi-definite")
             throw(err)
@@ -104,13 +116,19 @@ mutable struct QuadraticCost{T} <: CostFunction
     end
 end
 
+function QuadraticCost(Q,R; H=zeros(size(R,1), size(Q,1)), q=zeros(size(Q,1)),
+        r=zeros(size(R,1)), c=0.0, Qf=zero(Q), qf=zero(q), cf=0.0)
+    QuadraticCost(Q,R,H,q,r,c,Qf,qf,cf)
+end
+
+
 """
 $(SIGNATURES)
 Cost function of the form
     1/2(xₙ-x_f)ᵀ Qf (xₙ - x_f) + 1/2 ∫ ( (x-x_f)ᵀQ(x-xf) + uᵀRu ) dt from 0 to tf
 R must be positive definite, Q and Qf must be positive semidefinite
 """
-function LQRCost(Q::AbstractArray{T},R::AbstractArray{T},Qf::AbstractArray{T},xf::AbstractVector{T}) where T
+function LQRCost(Q::AbstractArray, R::AbstractArray, Qf::AbstractArray, xf::AbstractVector)
     H = zeros(size(R,1),size(Q,1))
     q = -Q*xf
     r = zeros(size(R,1))
@@ -120,7 +138,8 @@ function LQRCost(Q::AbstractArray{T},R::AbstractArray{T},Qf::AbstractArray{T},xf
     return QuadraticCost(Q, R, H, q, r, c, Qf, qf, cf)
 end
 
-function LQRCostTerminal(Qf::AbstractArray{T},xf::AbstractVector{T}) where T
+# QUESTION: remove?
+function LQRCostTerminal(Qf::AbstractArray,xf::AbstractVector)
     qf = -Qf*xf
     cf = 0.5*xf'*Qf*xf
     return QuadraticCost(zeros(0,0),zeros(0,0),zeros(0,0),zeros(0),zeros(0),0.,Qf,qf,cf)
@@ -162,8 +181,18 @@ function gradient!(grad, cost::QuadraticCost, xN::AbstractVector)
     return nothing
 end
 
-function get_sizes(cost::QuadraticCost)
-    return size(cost.Q,1), size(cost.R,1)
+function hessian!(hess, cost::QuadraticCost,
+        x::AbstractVector, u::AbstractVector)
+    hess.xx .= cost.Q
+    hess.uu .= cost.R
+    hess.ux .= cost.H
+    hess.xu .= cost.H'
+    return nothing
+end
+
+function hessian!(hess, cost::QuadraticCost, xN::AbstractVector)
+    hess .= cost.Qf
+    return nothing
 end
 
 function copy(cost::QuadraticCost)
@@ -283,5 +312,4 @@ function cost_expansion!(S::Expansion{T}, cost::GenericCost, xN::Vector{T}) wher
     return nothing
 end
 
-get_sizes(cost::GenericCost) = cost.n, cost.m
-copy(cost::GenericCost) = GenericCost(copy(cost.ℓ,cost.ℓ,cost.n,cost.m))
+copy(cost::GenericCost) = GenericCost(cost.ℓ,cost.ℓ,cost.n,cost.m)

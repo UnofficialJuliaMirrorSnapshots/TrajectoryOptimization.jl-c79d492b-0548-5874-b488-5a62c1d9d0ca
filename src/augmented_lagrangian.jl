@@ -141,7 +141,7 @@ end
 "Generate augmented Lagrangian problem from constrained problem"
 function AugmentedLagrangianProblem(prob::Problem{T},solver::AugmentedLagrangianSolver{T}) where T
     obj_al = AugmentedLagrangianObjective(prob,solver)
-    prob_al = update_problem(prob,obj=obj_al,constraints=ProblemConstraints(),newProb=false)
+    prob_al = update_problem(prob,obj=obj_al,constraints=ProblemConstraints(prob.N),newProb=false)
 end
 
 "Evaluate maximum constraint violation"
@@ -243,22 +243,6 @@ end
 "Cost function terms for Lagrangian and quadratic penalty"
 function aula_cost(a::AbstractVector{Bool},c::AbstractVector{T},λ::AbstractVector{T},μ::AbstractVector{T}) where T
     λ'c + 1/2*c'Diagonal(a .* μ)*c
-end
-
-function stage_constraint_cost(obj::AugmentedLagrangianObjective{T},x::AbstractVector{T},u::AbstractVector{T},k::Int) where T
-    c = obj.C[k]
-    λ = obj.λ[k]
-    μ = obj.μ[k]
-    a = obj.active_set[k]
-    aula_cost(a,c,λ,μ)
-end
-
-function stage_constraint_cost(obj::AugmentedLagrangianObjective{T},x::AbstractVector{T}) where T
-    c = obj.C[end]
-    λ = obj.λ[end]
-    μ = obj.μ[end]
-    a = obj.active_set[end]
-    aula_cost(a,c,λ,μ)
 end
 
 function stage_constraint_cost(c,λ,μ,

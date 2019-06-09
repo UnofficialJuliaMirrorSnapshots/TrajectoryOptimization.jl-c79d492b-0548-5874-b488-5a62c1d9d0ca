@@ -58,14 +58,24 @@ Z1 = Primals(Z1,X,U)
 @test Z1.X[1][1] == 100
 @test X[1][1] == 100
 
+Z2 = Primals(Z, Z0)
+@test Z2.Z == Z
 
 # Convert fom X,U to Z
 X = [rand(n) for k = 1:N]
-U = [rand(n) for k = 1:N]
+U = [rand(m) for k = 1:N]
 Z2 = Primals(X,U)
 @test Z2.equal == true
 @test Primals(prob, true).equal == true
 Z_rollout = Primals(prob, true)
+
+Z3 = TO.pack(prob)
+@test length(Z3) == NN
+
+@test TO.pack(X,U, part_z) == Z2.Z
+@test TO.pack(X,U) == Z2.Z
+
+
 
 
 # Test methods
@@ -202,7 +212,7 @@ bnds = TO.remove_bounds!(prob0)
 p = num_constraints(prob0)
 @test p0[1] == 9
 @test p[1] == 1
-@test p[N] == 0
+@test p[N] == 1
 z_U,z_L,g_U,g_L = TO.get_bounds(prob0,bnds)
 Z_U = Primals(z_U, part_z)
 Z_L = Primals(z_L, part_z)
@@ -212,15 +222,18 @@ Z_L = Primals(z_L, part_z)
 
 
 # Test solve
-# for i = 1:10
-#     sol,solver = solve(prob, opts)
-#     if solver.stats[:info] == :Solve_Succeeded
-#         break
-#     end
-#     if i == 10
-#         error("The problem should have solved successfully")
-#     end
-# end
-# opts = DIRCOLSolverOptions{Float64}()
-# solve(prob, opts)
-# TO.solve_moi(prob, opts)
+for i = 1:10
+    sol,solver = solve(prob, opts)
+    if solver.stats[:info] == :Solve_Succeeded
+        break
+    end
+    if i == 10
+        # error("The problem should have solved successfully")
+    end
+end
+opts = DIRCOLSolverOptions{Float64}()
+solve(prob, opts)
+TO.solve_moi(prob, opts)
+
+
+@test_nowarn TO.write_ipopt_options()

@@ -251,7 +251,7 @@ Assumes x,y are the first two dimensions of the state vector
 """
 function planar_obstacle_constraint(n, m, x_obs, r_obs, label=:obstacle)
     c(v,x,u) = v[1] = circle_constraint(x, x_obs, r_obs)
-    # c(v,x) = circle_constraint(x, x_obs, r_obs)
+    c(v,x) = circle_constraint(x, x_obs, r_obs)
     Constraint{Inequality}(c, n, m, 1, :obstacle)
 end
 
@@ -329,12 +329,14 @@ function remove_bounds!(C::ConstraintSet)
     filter!(x->!isa(x,BoundConstraint),C)
     return bnds
 end
+"$(SIGNATURES) Remove a bound from a ConstraintSet given its label"
 function Base.pop!(C::ConstraintSet, label::Symbol)
     con = filter(x->x.label==label,C)
     filter!(x->x.label≠label,C)
     return con[1]
 end
 
+"$(SIGNATURES) Generate the partition for splitting up the combined constraint vector into individual constraints."
 function PartedArrays.create_partition(C::ConstraintSet,contype=:stage)
     if !isempty(C)
         lens = length.(C,contype)
@@ -390,12 +392,14 @@ function evaluate!(c::PartedVector, C::ConstraintSet, x)
     end
 end
 
+"$(SIGNATURES) Compute the constraint Jacobian of a ConstraintSet"
 function jacobian!(c::PartedMatrix, C::ConstraintSet, x, u)
     for con in stage(C)
         jacobian!(c[con.label], con, x, u)
     end
 end
 
+"$(SIGNATURES) Compute the constraint Jacobian of a ConstraintSet at the terminal time step"
 function jacobian!(c::PartedMatrix, C::ConstraintSet, x)
     for con in terminal(C)
         jacobian!(c[con.label], con, x)
@@ -422,24 +426,28 @@ function update_constraint_set_jacobians(cs::ConstraintSet,n::Int,n̄::Int,m::In
 end
 
 # "Type that stores a trajectory of constraint sets"
+"""$(TYPEDEF)
+Collection of constraints for a trajectory optimization problem.
+    Essentially a list of `ConstraintSets` for each time step
+"""
 struct ProblemConstraints
     C::Vector{<:ConstraintSet}
 end
 
+"""Copy a ConstraintSet over all time steps"""
 function ProblemConstraints(C::ConstraintSet,N::Int)
     C = append!(GeneralConstraint[], C)
     ProblemConstraints([copy(C) for k = 1:N])
 end
 
+"""Copy a ConstraintSet over all stage time steps, with a unique terminal constraint set"""
 function ProblemConstraints(C::ConstraintSet,C_term::ConstraintSet,N::Int)
     C = append!(GeneralConstraint[], C)
-    ProblemConstraints([k < N ? [C...,TerminalConstraint()] : [Constraint(),C_term...] for k = 1:N])
+    C_term = append!(GeneralConstraint[], C_term)
+    ProblemConstraints([k < N ? C : C_term for k = 1:N])
 end
 
-function ProblemConstraints(C::Vector{<:ConstraintSet},C_term::ConstraintSet)
-    ProblemConstraints([C...,[Constraint(),C_term...]])
-end
-
+"""Create an empty set of ProblemConstraints for a problem with size N"""
 function ProblemConstraints(N::Int)
     ProblemConstraints([GeneralConstraint[] for k = 1:N])
 end
@@ -451,7 +459,10 @@ end
 num_stage_constraints(pcon::ProblemConstraints) = map(num_stage_constraints, pcon.C)
 num_terminal_constraints(pcon::ProblemConstraints) = map(num_terminal_constraints, pcon.C)
 
-function TrajectoryOptimization.num_constraints(pcon::ProblemConstraints)
+"""$(SIGNATURES)
+Count the number of constraints at each time step.
+"""
+function TrajectoryOptimization.num_constraints(pcon::ProblemConstraints)::Vector{Int}
     N = length(pcon.C)
     p = zeros(Int,N)
     for k = 1:N-1
@@ -471,7 +482,7 @@ Base.copy(pcon::ProblemConstraints) = ProblemConstraints(deepcopy(pcon.C))
 Base.length(pcon::ProblemConstraints) = length(pcon.C)
 
 
-"Update constraints trajectories"
+"Update constraints trajectories from ProblemConstraints"
 function update_constraints!(C::PartedVecTrajectory{T}, constraints::ProblemConstraints,
         X::AbstractVectorTrajectory{T}, U::AbstractVectorTrajectory{T}) where T
     N = length(X)
@@ -481,6 +492,7 @@ function update_constraints!(C::PartedVecTrajectory{T}, constraints::ProblemCons
     evaluate!(C[N],constraints[N],X[N])
 end
 
+"Compute constraint Jacobians from ProblemConstraints"
 function jacobian!(C::PartedMatTrajectory{T}, constraints::ProblemConstraints,
         X::AbstractVectorTrajectory{T}, U::AbstractVectorTrajectory{T}) where T
     N = length(X)
