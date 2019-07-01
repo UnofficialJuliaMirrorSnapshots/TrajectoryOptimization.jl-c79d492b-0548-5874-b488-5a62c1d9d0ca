@@ -3,7 +3,7 @@ cost(prob::Problem, V::PrimalDual) = cost(prob.obj, V.X, V.U)
 ############################
 #       CONSTRAINTS        #
 ############################
-function dynamics_constraints!(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V)
+function dynamics_constraints!(prob::Problem, solver::DirectSolver, V=solver.V)
     N = prob.N
     X,U = V.X, V.U
     solver.fVal[1] .= V.X[1] - prob.x0
@@ -20,6 +20,7 @@ function dynamics_jacobian!(prob::Problem, solver::ProjectedNewtonSolver, V=solv
     solver.∇F[1].xx .= Diagonal(I,n)
     solver.Y[1:n,1:n] .= Diagonal(I,n)
     part = (x=1:n, u =n .+ (1:m), x1=n+m .+ (1:n))
+    p = num_constraints(prob)
     off1 = n
     off2 = 0
     for k = 1:N-1
@@ -27,12 +28,12 @@ function dynamics_jacobian!(prob::Problem, solver::ProjectedNewtonSolver, V=solv
         solver.Y[off1 .+ part.x, off2 .+ part.x] .= solver.∇F[k+1].xx
         solver.Y[off1 .+ part.x, off2 .+ part.u] .= solver.∇F[k+1].xu
         solver.Y[off1 .+ part.x, off2 .+ part.x1] .= -Diagonal(I,n)
-        off1 += n
+        off1 += n + p[k]
         off2 += n+m
     end
 end
 
-function update_constraints!(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V)
+function update_constraints!(prob::Problem, solver::DirectSolver, V=solver.V)
     n,m,N = size(prob)
     for k = 1:N-1
         evaluate!(solver.C[k], prob.constraints[k], V.X[k], V.U[k])
@@ -43,12 +44,17 @@ end
 function active_set!(prob::Problem, solver::ProjectedNewtonSolver)
     n,m,N = size(prob)
     P = sum(num_constraints(prob)) + n*N
+    a0 = copy(solver.a)
     for k = 1:N
         active_set!(solver.active_set[k], solver.C[k], solver.opts.active_set_tolerance)
+    end
+    if solver.opts.verbose && a0 != solver.a
+        println("active set changed")
     end
 end
 
 function active_set!(a::AbstractVector{Bool}, c::AbstractArray{T}, tol::T=0.0) where T
+    a0 = copy(a)
     equality, inequality = c.parts[:equality], c.parts[:inequality]
     a[equality] .= true
     a[inequality] .= c.inequality .>= -tol
@@ -58,19 +64,23 @@ end
 ######################################
 #       CONSTRAINT JACBOBIANS        #
 ######################################
-function constraint_jacobian!(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V)
+function constraint_jacobian!(prob::Problem, ∇C::Vector, X, U)
     n,m,N = size(prob)
     for k = 1:N-1
-        jacobian!(solver.∇C[k], prob.constraints[k], V.X[k], V.U[k])
+        jacobian!(∇C[k], prob.constraints[k], X[k], U[k])
     end
-    jacobian!(solver.∇C[N], prob.constraints[N], V.X[N])
+    jacobian!(∇C[N], prob.constraints[N], X[N])
 end
+constraint_jacobian!(prob::Problem, solver::DirectSolver, V=solver.V) =
+    constraint_jacobian!(prob, solver.∇C, V.X, V.U)
+# constraint_jacobian!(prob::Problem, Y::KKTJacobian, V=solver.V) =
+#     constraint_jacobian!(prob, Y.∇C, V.X, V.U)
 
-function active_constraints(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V)
+function active_constraints(prob::Problem, solver::ProjectedNewtonSolver)
     n,m,N = size(prob)
     a = solver.a.duals
     # return view(solver.Y, a, :), view(solver.y, a)
-    return solver.Y[a,:], solver.y[a]
+    return solver.Y.blocks[a,:], solver.y[a]
 end
 
 
@@ -114,7 +124,18 @@ end
 ######################
 #     FUNCTIONS      #
 ######################
-function max_violation(solver::ProjectedNewtonSolver{T}) where T
+function update!(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V, active_set=true)
+    dynamics_constraints!(prob, solver, V)
+    update_constraints!(prob, solver, V)
+    dynamics_jacobian!(prob, solver, V)
+    constraint_jacobian!(prob, solver, V)
+    cost_expansion!(prob, solver, V)
+    if active_set
+        active_set!(prob, solver)
+    end
+end
+
+function max_violation(solver::DirectSolver{T}) where T
     c_max = 0.0
     C = solver.C
     N = length(C)
@@ -130,28 +151,68 @@ function max_violation(solver::ProjectedNewtonSolver{T}) where T
     return c_max
 end
 
-function projection!(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V)
+function calc_violations(solver::ProjectedNewtonSolver{T}) where T
+    C = solver.C
+    N = length(C)
+    v = [zero(c) for c in C]
+    v = zeros(N)
+    for k = 1:N
+        if length(C[k].equality) > 0
+            v[k] = norm(C[k].equality,Inf)
+        end
+        if length(C[k].inequality) > 0
+            v[k] = max(pos(maximum(C[k].inequality)), v[k])
+        end
+    end
+    return v
+end
+
+function projection!(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V, active_set_update=true)
     Z = primals(V)
-    eps_feasible = 1e-6
+    eps_feasible = solver.opts.feasibility_tolerance
     count = 0
+    # cost_expansion!(prob, solver, V)
+    H = Diagonal(solver.H)
     while true
         dynamics_constraints!(prob, solver, V)
         update_constraints!(prob, solver, V)
         dynamics_jacobian!(prob, solver, V)
         constraint_jacobian!(prob, solver, V)
-        active_set!(prob, solver)
+        if active_set_update
+            active_set!(prob, solver)
+        end
         Y,y = active_constraints(prob, solver)
+        HinvY = H\Y'
 
         viol = norm(y,Inf)
-        println("feas: ", viol)
+        if solver.opts.verbose
+            println("feas: ", viol)
+        end
         if viol < eps_feasible || count > 10
             break
         else
-            δZ = -Y'*((Y*Y')\y)
+            δZ = -HinvY*((Y*HinvY)\y)
             Z .+= δZ
             count += 1
         end
     end
+end
+
+function multiplier_projection!(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V)
+    g = solver.g
+    a = solver.a.duals
+    Y,y = active_constraints(prob, solver)
+    λ = duals(V)[a]
+
+    res0 = g + Y'λ
+    δλ = -(Y*Y')\(Y*res0)
+    λ_ = λ + δλ
+    res = g + Y'*λ_
+    @show size(view(duals(V),a))
+    @show size(λ_)
+    copyto!(view(duals(V),a), λ_)
+    res = norm(residual(prob, solver, V))
+    return res
 end
 
 function solveKKT(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V)
@@ -167,59 +228,399 @@ function solveKKT(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V)
     return δV
 end
 
-function residual(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V)
-    _,y = active_constraints(prob, solver)
+function solveKKT_Shur(prob::Problem, solver::ProjectedNewtonSolver, Hinv, V=solver.V)
+    a = solver.a
+    δV = zero(V.V)
+    λ = duals(V)[a.duals]
+    Y,y = active_constraints(prob, solver)
     g = solver.g
-    res = [g; y]
-end
 
-function newton_step!(prob::Problem, solver::ProjectedNewtonSolver)
-    J0 = cost(prob)
+    YHinv = Y*Hinv
+    S0 = Symmetric(YHinv*Y')
+    L = cholesky(S0)
+    δλ = L\(y-YHinv*g)
+    δz = -Hinv*(g+Y'δλ)
 
-    V = solver.V
-    P = length(duals(V))
-    Q = [k < N ? Expansion(prob) : Expansion(prob,:x) for k = 1:N]
-    cost_expansion!(Q, prob.obj, V.X, V.U)
-    dynamics_constraints!(prob, solver)
-    dynamics_jacobian!(prob, solver)
-    H,g = cost_expansion(Q)
-    D,d = dynamics_expansion(prob, solver)
-
-    # Form the KKT system
-    A = [H D'; D zeros(P,P)]
-    b = Vector([g;d])
-    println("residual: ", norm(b))
-
-    # Solve the KKT system
-    δV = -A\b
-
-    V1 = copy(V)
-    V1.V .+= δV
-    dynamics_constraints!(prob, solver, V1)
-    dynamics_jacobian!(prob, solver, V1)
-    cost_expansion!(Q, prob.obj, V1.X, V1.U)
-    H,g = cost_expansion(Q)
-    D,d = dynamics_expansion(prob, solver)
-    b1 = [g;d]
-    J = cost(prob, V1)
-    println("New cost: ", J)
-    println("New res: ", norm(b1))
-    projection!(prob, solver, V1)
-
-
-    H,g = cost_expansion(Q)
-    D,d = dynamics_expansion(prob, solver)
-    b2 = [g;d]
-    J = cost(prob, V1)
-    println("Post cost: ", J)
-    println("Post res: ", norm(b2))
-
-
-
-    α = 1
-
+    δV[solver.parts.primals] .= δz
+    δV[solver.parts.duals[solver.a.duals]] .= δλ
     return δV
 end
+
+function solveKKT_chol(prob::Problem, solver::ProjectedNewtonSolver, Qinv, Rinv, A, B, C, D, V=solver.V)
+    a = solver.a
+    δV = zero(V.V)
+    λ = duals(V)[a.duals]
+    Y,y = active_constraints(prob, solver)
+    g = solver.g
+
+    L = chol_newton(prob, solver, Qinv, Rinv, A, B, C, D)
+    C = Cholesky(Array(L),'L',0)
+
+    YHinv = Y*Hinv
+    # S0 = L*L'
+    # δλ = L'\(L\(y-YHinv*g))
+    δλ = C\(y-YHinv*g)
+    δz = -Hinv*(g+Y'δλ)
+
+    δV[solver.parts.primals] .= δz
+    δV[solver.parts.duals[solver.a.duals]] .= δλ
+    return δV
+end
+
+function solveKKT_chol_seq(prob::Problem, solver::ProjectedNewtonSolver, Qinv, Rinv, A, B, C, D, V=solver.V)
+    a = solver.a
+    δV = zero(V.V)
+    λ = duals(V)[a.duals]
+    Y,y = active_constraints(prob, solver)
+    g = solver.g
+
+    YHinv = Y*Hinv
+    δλ, = solve_cholesky(prob, solver, Qinv, Rinv, A, B, C, D)
+    δz = -Hinv*(g+Y'δλ)
+
+    δV[solver.parts.primals] .= δz
+    δV[solver.parts.duals[solver.a.duals]] .= Array(δλ)
+    return δV
+end
+
+function residual(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V)
+    a = solver.a
+    Y,y = active_constraints(prob, solver)
+    λ = duals(V)[a.duals]
+    g = solver.g
+    res = [g + Y'λ; y]
+end
+
+
+function line_search(prob::Problem, solver::ProjectedNewtonSolver, δV)
+    α = 1.0
+    s = 0.01
+    J0 = cost(prob, solver.V)
+    update!(prob, solver)
+    res0 = norm(residual(prob, solver))
+    count = 0
+    solver.opts.verbose ? println("res0: $res0") : nothing
+    while count < 10
+        V_ = solver.V + α*δV
+        # projection!(prob, solver, V_)
+
+        # Calculate residual
+        projection!(prob, solver, V_)
+        res = multiplier_projection!(prob, solver, V_)
+        J = cost(prob, V_)
+
+        # Calculate max violation
+        viol = max_violation(solver)
+
+        if solver.opts.verbose
+            println("cost: $J \t residual: $res \t feas: $viol")
+        end
+        if res < (1-α*s)*res0
+            solver.opts.verbose ? println("α: $α") : nothing
+            return V_
+        end
+        count += 1
+        α /= 2
+    end
+    return solver.V
+end
+
+
+
+
+
+
+function newton_step!(prob::Problem, solver::ProjectedNewtonSolver)
+    V = solver.V
+    verbose = solver.opts.verbose
+
+    # Initial stats
+    update!(prob, solver)
+    J0 = cost(prob, V)
+    res0 = norm(residual(prob, solver))
+    viol0 = max_violation(solver)
+
+    # Projection
+    verbose ? println("\nProjection:") : nothing
+    projection!(prob, solver)
+    update!(prob, solver)
+    multiplier_projection!(prob, solver)
+
+    # Solve KKT
+    J1 = cost(prob, V)
+    res1 = norm(residual(prob, solver))
+    viol1 = max_violation(solver)
+    δV = solveKKT(prob, solver)
+
+    # Line Search
+    verbose ? println("\nLine Search") : nothing
+    V_ = line_search(prob, solver, δV)
+    J_ = cost(prob, V_)
+    res_ = norm(residual(prob, solver, V_))
+    viol_ = max_violation(solver)
+
+    # Print Stats
+    if verbose
+        println("\nStats")
+        println("cost: $J0 → $J1 → $J_")
+        println("res: $res0 → $res1 → $res_")
+        println("viol: $viol0 → $viol1 → $viol_")
+    end
+
+    return V_
+end
+
+
+function buildShurCompliment(prob::Problem, solver::ProjectedNewtonSolver)
+    n,m,N = size(prob)
+
+    Hinv = inv(Diagonal(solver.H))
+    Qinv = [begin
+                off = (k-1)*(n+m) .+ (1:n);
+                Diagonal(Hinv[off,off]);
+            end for k = 1:N]
+    Rinv = [begin
+                off = (k-1)*(n+m) .+ (n+1:n+m);
+                Diagonal(Hinv[off,off]);
+            end for k = 1:N-1]
+
+    A = [F.xx for F in solver.∇F[2:end]]  # First jacobian is for initial condition
+    B = [F.xu for F in solver.∇F[2:end]]
+    C = [Array(F.x[a,:]) for (F,a) in zip(solver.∇C, solver.active_set)]
+    D = [Array(F.u[a,:]) for (F,a) in zip(solver.∇C, solver.active_set)]
+
+    P = num_active_constraints(solver)
+    S = spzeros(P,P)
+
+    _buildShurCompliment!(S, prob, solver, Qinv, Rinv, A, B, C, D)
+
+    L = chol_newton(prob, solver, Qinv, Rinv, A, B, C, D)
+
+    return Symmetric(S), L
+end
+
+function _buildShurCompliment!(S, prob::Problem, solver::ProjectedNewtonSolver, Qinv, Rinv, A, B, C, D)
+    n,m,N = size(prob)
+
+    p = sum.(solver.active_set)
+    pcum = insert!(cumsum(p), 1, 0)
+
+    dinds = 1:n
+    cinds = n .+ (1:p[1])
+    S[dinds,dinds] = Qinv[1]
+    S[dinds,n .+ dinds] = Qinv[1]*A[1]'
+    S[dinds,n .+ cinds] = Qinv[1]*C[1]'
+
+    for k = 1:N-1
+        off = pcum[k] + k*n
+        dinds = off .+ (1:n)
+        cinds = off + n .+ (1:p[k])
+        S[dinds,dinds] = A[k]*Qinv[k]*A[k]' + B[k]*Rinv[k]*B[k]' + Qinv[k+1]
+        S[dinds,cinds] = A[k]*Qinv[k]*C[k]' + B[k]*Rinv[k]*D[k]'
+        S[cinds,cinds] = C[k]*Qinv[k]*C[k]' + D[k]*Rinv[k]*D[k]'
+        if k < N-1
+            S[dinds,dinds .+ (p[k] + n)] = -Qinv[k+1]*A[k+1]'
+            S[dinds, (off + p[k] + 2n) .+ (1:p[k+1])] = -Qinv[k+1]*C[k+1]'
+        else
+            S[dinds, (off + p[k] + n) .+ (1:p[k+1])] = -Qinv[k+1]*C[k+1]'
+        end
+    end
+    off = pcum[N] + N*n
+    cinds = off .+ (1:p[N])
+    S[cinds,cinds] = C[N]*Qinv[N]*C[N]'
+
+end
+
+function chol_newton(prob, solver, Qinv, Rinv, A, B, C, D)
+    n,m,N = size(prob)
+    P = num_active_constraints(solver)
+    S = LowerTriangular(zeros(P,P))
+
+    # Block indices
+    len = ones(Int,2,N-1)*n
+    p = sum.(solver.active_set)
+    len[2,:] = p[1:end-1]
+    len = append!([1,3], vec(len))
+    push!(len, p[N])
+    lcum = cumsum(len)
+    ind = [lcum[k]:lcum[k+1]-1 for k = 1:length(lcum)-1]
+
+    # Initial condition
+    G0 = cholesky(Qinv[1]).L
+    F1 = A[1]*G0
+    G1 = cholesky(Symmetric(B[1]*Rinv[1]*B[1]' + Qinv[2]))
+    L1 = C[1]*G0
+    M1 = D[1]*Rinv[1]*B[1]'/(G1.U)
+    N1 = cholesky(D[1]*Rinv[1]*D[1]' - M1*M1')
+
+    S[ind[1], ind[1]] = G0
+    S[ind[2], ind[1]] = F1
+    S[ind[2], ind[2]] = G1.L
+    S[ind[3], ind[1]] = L1
+    S[ind[3], ind[2]] = M1
+    S[ind[3], ind[3]] = N1.L
+
+
+    G_ = G1
+    M_ = M1
+    N_ = N1
+    for k = 2:N-1
+        E = -A[k]*Qinv[k]/G_.U
+        F = -E*M_'/N_.U
+        G = cholesky(Symmetric(A[k]*Qinv[k]*A[k]' + B[k]*Rinv[k]*B[k]' + Qinv[k+1] - E*E' - F*F'))
+
+        K = -C[k]*Qinv[k]/G_.U
+        L = -K*M_'/N_.U
+        Q = inv(Qinv[k])
+        M = (C[k]*Qinv[k]*( Q - G_.U\(I - (M_'/N_.U) * (N_.L\M_) )/G_.L )*Qinv[k]*A[k]' + D[k]*Rinv[k]*B[k]')/G.U
+        N = cholesky(C[k]*Qinv[k]*C[k]' + D[k]*Rinv[k]*D[k]' - K*K' - L*L' - M*M')
+
+        i = 4 + (k-2)*2
+        j = 2 + (k-2)*2
+        S[ind[i],   ind[j]  ] = E
+        S[ind[i],   ind[j+1]] = F
+        S[ind[i],   ind[j+2]] = G.L
+        S[ind[i+1], ind[j]  ] = K
+        S[ind[i+1], ind[j+1]] = L
+        S[ind[i+1], ind[j+2]] = M
+        S[ind[i+1], ind[j+3]] = N.L
+
+        G_,M_,N_ = G,M,N
+    end
+    N = prob.N
+
+    E = -C[N]*Qinv[N]/G_.U
+    F = -E*M_'/N_.U
+    G = cholesky(Symmetric(C[N]*Qinv[N]*C[N]' - E*E' - F*F'))
+
+    i = 4 + (N-2)*2
+    j = 2 + (N-2)*2
+    S[ind[i], ind[j]  ] = E
+    S[ind[i], ind[j+1]] = F
+    S[ind[i], ind[j+2]] = G.L
+
+    return S
+end
+
+function solve_cholesky(prob::Problem, solver::ProjectedNewtonSolver, Hinv, Qinv, Rinv, A, B, C, D)
+    n,m,N = size(prob)
+    Nb = 2N  # number of blocks
+    p_active = sum.(solver.active_set)
+    y_part = [sum(solver.a.A[Block(k)]) for k = 2:2N+1]
+    Pa = sum(y_part)
+
+    Y,y = active_constraints(prob, solver)
+    g = solver.g
+
+    r = PseudoBlockArray(y - Y*Hinv*g, y_part)
+    λ_ = BlockArray(zeros(Pa), y_part)
+    λ = BlockArray(zeros(Pa), y_part)
+
+    # Init arrays
+    E = [zeros(n,n) for p in p_active]
+    F = [zeros(p,n) for p in p_active]
+    G = [cholesky(Matrix(I,n,n)) for p in p_active]
+
+    K = [zeros(p,n) for p in p_active]
+    L = [zeros(n,n) for p in p_active]
+    M = [zeros(p,n) for p in p_active]
+    H = [cholesky(Matrix(I,n,n)) for p in p_active]
+
+    # Initial condition
+    G0 = cholesky(Qinv[1])
+    λ_[Block(1)] = G0.L\r[Block(1)]
+
+    F[1] = A[1]*G0.L
+    G[1] = cholesky(Symmetric(B[1]*Rinv[1]*B[1]' + Qinv[2]))
+    λ_[Block(2)] = G[1].L\(r[Block(2)] - F[1]*λ_[Block(1)])
+
+    L[1] = C[1]*G0.L
+    M[1] = D[1]*Rinv[1]*B[1]'/(G[1].U)
+    H[1] = cholesky(D[1]*Rinv[1]*D[1]' - M[1]*M[1]')
+    λ_[Block(3)] = H[1].L\(r[Block(3)] - M[1]*λ_[Block(2)] - L[1]*λ_[Block(1)])
+
+    G_ = G[1]
+    M_ = M[1]
+    H_ = H[1]
+    i = 4
+    for k = 2:N-1
+        E[k] = -A[k]*Qinv[k]/G_.U
+        F[k] = -E[k]*M_'/H_.U
+        G[k] = cholesky(Symmetric(A[k]*Qinv[k]*A[k]' + B[k]*Rinv[k]*B[k]' + Qinv[k+1] - E[k]*E[k]' - F[k]*F[k]'))
+        # println("\n Time Step $k")
+        # @show i
+        # @show size(F)
+        # @show size(λ_[Block(i-1)])
+        λ_[Block(i)] = G[k].L\(r[Block(i)] - F[k]*λ_[Block(i-1)] - E[k]*λ_[Block(i-2)])
+        i += 1
+
+        K[k] = -C[k]*Qinv[k]/G_.U
+        L[k] = -K[k]*M_'/H_.U
+        Q = inv(Qinv[k])
+        M[k] = (C[k]*Qinv[k]*( Q - G_.U\(I - (M_'/H_.U) * (H_.L\M_) )/G_.L )*Qinv[k]*A[k]' + D[k]*Rinv[k]*B[k]')/G[k].U
+        H[k] = cholesky(C[k]*Qinv[k]*C[k]' + D[k]*Rinv[k]*D[k]' - K[k]*K[k]' - L[k]*L[k]' - M[k]*M[k]')
+        # @show i
+        # @show size(r[Block(i)])
+        # @show size(L)
+        # @show size(λ_[Block(i-2)])
+        λ_[Block(i)] = H[k].L\(r[Block(i)] - M[k]*λ_[Block(i-1)] - L[k]*λ_[Block(i-2)] - K[k]*λ_[Block(i-3)])
+        i += 1
+
+        G_, M_, H_ = G[k], M[k], H[k]
+    end
+
+    # Terminal
+    N = prob.N
+
+    E[N] = -C[N]*Qinv[N]/G_.U
+    F[N] = -E[N]*M_'/H_.U
+    G[N] = cholesky(Symmetric(C[N]*Qinv[N]*C[N]' - E[N]*E[N]' - F[N]*F[N]'))
+    λ_[Block(i)] = G[N].L\(r[Block(i)] - F[N]*λ_[Block(i-1)] - E[N]*λ_[Block(i-2)])
+
+    # return λ_
+
+    # BACK SUBSTITUTION
+    λ[Block(Nb)] = G[N].U\λ_[Block(Nb)]
+    λ[Block(Nb-1)] = H[N-1].U\(λ_[Block(Nb-1)] - F[N]'λ[Block(Nb)])
+    λ[Block(Nb-2)] = G[N-1].U\(λ_[Block(Nb-2)] - M[N-1]'λ[Block(Nb-1)] - E[N]'λ[Block(Nb)])
+
+    i = Nb-3
+    for k = N-2:-1:1
+        λ[Block(i)] = H[k].U\(λ_[Block(i)] - F[k+1]'λ[Block(i+1)] - L[k+1]'λ[Block(i+2)])
+        i -= 1
+        λ[Block(i)] = G[k].U\(λ_[Block(i)] - M[k]'λ[Block(i+1)] - E[k+1]'λ[Block(i+2)] - K[k+1]'λ[Block(i+3)])
+        i -= 1
+    end
+    λ[Block(1)] = G0.U\(λ_[Block(1)] - F[1]'λ[Block(2)] - L[1]'λ[Block(3)])
+
+    return λ, λ_, r
+
+end
+
+
+function jacobian_permutation(prob::Problem, solver::ProjectedNewtonSolver)
+    n,m,N = size(prob)
+    inds = collect(1:length(solver.y))
+    p = num_constraints(prob)
+    pcum = insert!(cumsum(p),1,0)
+
+    off = n
+    for k = 1:N-1
+        off1 = n + (k-1)*n
+        off2 = N*n + pcum[k]
+        println(off1, " ", off2)
+        inds[off .+ (1:n)] = off1 .+ (1:n)
+        off += n
+        inds[off .+ (1:p[k])] = off2 .+ (1:p[k])
+        off += p[k]
+    end
+    return inds
+end
+
+
+
+
+
 
 function gen_usrfun_newton(prob::Problem)
     n,m,N = size(prob)
@@ -345,7 +746,7 @@ function gen_usrfun_newton(prob::Problem)
 
     function act_set(V::PrimalDual, tol=solver.opts.active_set_tolerance)
         update_constraints!(prob, solver)
-        active_set!(prob, solver, V, tol)
+        active_set!(prob, solver)
     end
 
 
@@ -468,6 +869,8 @@ function newton_step0(prob::Problem, V::PrimalDual, tol=1e-3)
     println("err: ", norm(err))
     println("max r: ", norm(b))
 
+    return δV
+
 
     V1 = copy(V_)
     Z1 = primals(V1)
@@ -559,28 +962,26 @@ function solve(prob::Problem, opts::ProjectedNewtonSolverOptions)::Problem
     return res
 end
 
-function calc_violations(solver::Union{AugmentedLagrangianSolver{T}, ProjectedNewtonSolver{T}}) where T
-    c_max = 0.0
-    C = solver.C
-    N = length(C)
-    p = length.(C)
-    v = [zeros(pi) for pi in p]
-    if length(C[1]) > 0
-        for k = 1:N
-            v[k][C[k].parts[:equality]] = abs.(C[k].equality)
-            if length(C[k].inequality) > 0
-                v[k][C[k].parts[:inequality]] = max.(C[k].inequality, 0)
-            end
-        end
-    end
-    return v
-end
+# function calc_violations(solver::Union{AugmentedLagrangianSolver{T}, ProjectedNewtonSolver{T}}) where T
+#     c_max = 0.0
+#     C = solver.C
+#     N = length(C)
+#     p = length.(C)
+#     v = [zeros(pi) for pi in p]
+#     for k = 1:N
+#         v[k][C[k].parts[:equality]] = abs.(C[k].equality)
+#         if length(C[k].inequality) > 0
+#             v[k][C[k].parts[:inequality]] = max.(C[k].inequality, 0)
+#         end
+#     end
+#     return v
+# end
 
-function residual(prob::Problem, solver::ProjectedNewtonSolver)
-    g = vcat([[q.x; q.u] for q in solver.Q]...)
-    d = vcat(solver.fVal...)
-    return norm([g;d]), norm(g), norm(d)
-end
+# function residual(prob::Problem, solver::ProjectedNewtonSolver)
+#     g = vcat([[q.x; q.u] for q in solver.Q]...)
+#     d = vcat(solver.fVal...)
+#     return norm([g;d]), norm(g), norm(d)
+# end
 
 
 function dynamics_expansion(prob::Problem, solver::ProjectedNewtonSolver)
