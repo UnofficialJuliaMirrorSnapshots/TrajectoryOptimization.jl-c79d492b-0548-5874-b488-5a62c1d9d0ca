@@ -8,13 +8,12 @@ abstract type CostFunction end
 CostTrajectory = Vector{C} where C <: CostFunction
 
 "Calculate unconstrained cost for X and U trajectories"
-function cost(c::CostTrajectory, X::VectorTrajectory{T}, U::VectorTrajectory{T})::T where T
+function cost(c::CostTrajectory, X::VectorTrajectory{T}, U::VectorTrajectory{T},H::Vector{T})::T where T
     N = length(X)
     J = 0.0
     for k = 1:N-1
-        J += stage_cost(c[k],X[k],U[k])
+        J += stage_cost(c[k],X[k],U[k],H[k])
     end
-    J /= (N-1.0)
     J += stage_cost(c[N],X[N])
     return J
 end
@@ -38,8 +37,6 @@ function Expansion{T,Q,R}(n::Int, m::Int) where {T,Q,R}
 end
 Expansion{T}(n::Int, m::Int) where T = Expansion{T,Matrix{T},Matrix{T}}(n,m)
 
-
-
 import Base./, Base.*
 function *(e::Expansion, a::Real)
     e.x .*= a
@@ -60,8 +57,8 @@ function /(e::Expansion,a::Real)
     return nothing
 end
 
-function copy(e::Expansion{T}) where T
-    Expansion{T}(copy(e.x),copy(e.u),copy(e.xx),copy(e.uu),copy(e.ux))
+function copy(e::Expansion)
+    Expansion(copy(e.x),copy(e.u),copy(e.xx),copy(e.uu),copy(e.ux))
 end
 
 function reset!(e::Expansion)
@@ -94,32 +91,29 @@ mutable struct QuadraticCost{T} <: CostFunction
     q::AbstractVector{T}                 # Linear term on states (n,)
     r::AbstractVector{T}                 # Linear term on controls (m,)
     c::T                                 # constant term
-    Qf::AbstractMatrix{T}                # Quadratic final cost for terminal state (n,n)
-    qf::AbstractVector{T}                # Linear term on terminal state (n,)
-    cf::T                                # constant term (terminal)
     function QuadraticCost(Q::AbstractMatrix{T}, R::AbstractMatrix{T}, H::AbstractMatrix{T},
-            q::AbstractVector{T}, r::AbstractVector{T}, c::T, Qf::AbstractMatrix{T},
-            qf::AbstractVector{T}, cf::T) where T
+            q::AbstractVector{T}, r::AbstractVector{T}, c::T) where T
         if !isposdef(R)
-            err = ArgumentError("R must be positive definite")
-            throw(err)
+            @warn "R is not positive definite"
         end
-        # TODO: needs test
         if !ispossemidef(Q)
             err = ArgumentError("Q must be positive semi-definite")
             throw(err)
         end
-        if !ispossemidef(Qf)
-            err = ArgumentError("Qf must be positive semi-definite")
-            throw(err)
-        end
-        new{T}(Q,R,H,q,r,c,Qf,qf,cf)
+
+        new{T}(Q,R,H,q,r,c)
     end
 end
 
+get_sizes(cost::QuadraticCost) = (size(cost.Q,1),size(cost.R,1))
+
 function QuadraticCost(Q,R; H=zeros(size(R,1), size(Q,1)), q=zeros(size(Q,1)),
-        r=zeros(size(R,1)), c=0.0, Qf=zero(Q), qf=zero(q), cf=0.0)
-    QuadraticCost(Q,R,H,q,r,c,Qf,qf,cf)
+        r=zeros(size(R,1)), c=0.0)
+    QuadraticCost(Q,R,H,q,r,c)
+end
+
+function QuadraticCost(Q,q,c)
+    QuadraticCost(Q,zeros(0,0),zeros(0,size(Q,1)),q,zeros(0),c)
 end
 
 
@@ -129,56 +123,58 @@ Cost function of the form
     1/2(xₙ-x_f)ᵀ Qf (xₙ - x_f) + 1/2 ∫ ( (x-x_f)ᵀQ(x-xf) + uᵀRu ) dt from 0 to tf
 R must be positive definite, Q and Qf must be positive semidefinite
 """
-function LQRCost(Q::AbstractArray, R::AbstractArray, Qf::AbstractArray, xf::AbstractVector)
+function LQRCost(Q::AbstractArray, R::AbstractArray, xf::AbstractVector)
     H = zeros(size(R,1),size(Q,1))
     q = -Q*xf
     r = zeros(size(R,1))
     c = 0.5*xf'*Q*xf
-    qf = -Qf*xf
-    cf = 0.5*xf'*Qf*xf
-    return QuadraticCost(Q, R, H, q, r, c, Qf, qf, cf)
+    return QuadraticCost(Q, R, H, q, r, c)
 end
 
-# QUESTION: remove?
 function LQRCostTerminal(Qf::AbstractArray,xf::AbstractVector)
     qf = -Qf*xf
     cf = 0.5*xf'*Qf*xf
-    return QuadraticCost(zeros(0,0),zeros(0,0),zeros(0,0),zeros(0),zeros(0),0.,Qf,qf,cf)
+    return QuadraticCost(Qf,zeros(0,0),zeros(0,size(Qf,1)),qf,zeros(0),cf)
 end
 
 function stage_cost(cost::QuadraticCost, x::AbstractVector{T}, u::AbstractVector{T}) where T
-    0.5*x'cost.Q*x + 0.5*u'*cost.R*u + cost.q'x + cost.r'u + cost.c
+    0.5*x'cost.Q*x + 0.5*u'*cost.R*u + cost.q'x + cost.r'u + cost.c + u'*cost.H*x
+end
+
+function stage_cost(cost::QuadraticCost, x::AbstractVector{T}, u::AbstractVector{T}, dt::T) where T
+    (0.5*x'cost.Q*x + 0.5*u'*cost.R*u + cost.q'x + cost.r'u + cost.c + u'*cost.H*x)*dt
 end
 
 function stage_cost(cost::QuadraticCost, xN::AbstractVector{T}) where T
-    0.5*xN'cost.Qf*xN + cost.qf'*xN + cost.cf
+    0.5*xN'cost.Q*xN + cost.q'*xN + cost.c
 end
 
 function cost_expansion!(Q::Expansion{T}, cost::QuadraticCost,
-        x::AbstractVector{T}, u::AbstractVector{T}) where T
-    Q.x .= cost.Q*x + cost.q
-    Q.u .= cost.R*u + cost.r
+        x::AbstractVector{T}, u::AbstractVector{T}, dt::T) where T
+    Q.x .= cost.Q*x + cost.q + cost.H'*u
+    Q.u .= cost.R*u + cost.r + cost.H*x
     Q.xx .= cost.Q
     Q.uu .= cost.R
     Q.ux .= cost.H
+    Q*dt
     return nothing
 end
 
 function cost_expansion!(S::Expansion{T}, cost::QuadraticCost, xN::AbstractVector{T}) where T
-    S.xx .= cost.Qf
-    S.x .= cost.Qf*xN + cost.qf
+    S.xx .= cost.Q
+    S.x .= cost.Q*xN + cost.q
     return nothing
 end
 
 function gradient!(grad, cost::QuadraticCost,
-        x::AbstractVector, u::AbstractVector)
-    grad.x .= cost.Q*x + cost.q
-    grad.u .= cost.R*u + cost.r
+        x::AbstractVector, u::AbstractVector, dt)
+    grad.x .= (cost.Q*x + cost.q + cost.H'*u)*dt
+    grad.u .= (cost.R*u + cost.r + cost.H*x)*dt
     return nothing
 end
 
 function gradient!(grad, cost::QuadraticCost, xN::AbstractVector)
-    grad .= cost.Qf*xN + cost.qf
+    grad .= cost.Q*xN + cost.q
     return nothing
 end
 
@@ -192,12 +188,12 @@ function hessian!(hess, cost::QuadraticCost,
 end
 
 function hessian!(hess, cost::QuadraticCost, xN::AbstractVector)
-    hess .= cost.Qf
+    hess .= cost.Q
     return nothing
 end
 
 function copy(cost::QuadraticCost)
-    return QuadraticCost(copy(cost.Q), copy(cost.R), copy(cost.H), copy(cost.q), copy(cost.r), copy(cost.c), copy(cost.Qf), copy(cost.qf), copy(cost.cf))
+    return QuadraticCost(copy(cost.Q), copy(cost.R), copy(cost.H), copy(cost.q), copy(cost.r), copy(cost.c))
 end
 
 """

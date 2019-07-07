@@ -1,15 +1,15 @@
+
 export
-    DIRCOLSolver,
-    DIRCOLSolverOptions
+    DIRCOLSolver
 
 abstract type DirectSolver{T} <: AbstractSolver{T} end
 abstract type DirectSolverOptions{T} <: AbstractSolverOptions{T} end
 
 abstract type QuadratureRule end
 abstract type HermiteSimpson <: QuadratureRule end
+abstract type Midpoint <: QuadratureRule end
 
 include("primals.jl")
-
 
 @with_kw mutable struct ProjectedNewtonSolverOptions{T} <: DirectSolverOptions{T}
     "Print output to console"
@@ -21,7 +21,6 @@ include("primals.jl")
     "Tolerance for constraint feasibility during projection"
     feasibility_tolerance = 1e-6
 end
-
 
 """
 $(TYPEDEF)
@@ -148,17 +147,17 @@ end
 
 
 
-
 @with_kw mutable struct DIRCOLSolverOptions{T} <: DirectSolverOptions{T}
-    "NLP Solver to use. Options are (:Ipopt) (more to be added in the future)"
+    "NLP Solver to use. See MathOptInterface for available NLP solvers"
     nlp::Symbol = :Ipopt
 
     "Options dictionary for the nlp solver"
-    opts::Dict{String,Any} = Dict{String,Any}()
+    opts::Dict{Symbol,Any} = Dict{Symbol,Any}()
 
     "Print output to console"
     verbose::Bool = true
 end
+
 
 
 """
@@ -195,7 +194,7 @@ function AbstractSolver(prob::Problem, opts::DIRCOLSolverOptions, Z::Primals{T}=
     c_part2 = [create_partition2(c_stage[k],n,m) for k = 1:N-1]
 
     # Create Trajectories
-    ∇F         = [PartedMatrix(zeros(T,n,n+m),part_f)           for k = 1:N]
+    ∇F         = [PartedMatrix(zeros(T,n,length(prob.model)),part_f)         for k = 1:N]
     C          = [PartedVector(T,constraints[k],:stage)     for k = 1:N-1]
     ∇C         = [PartedMatrix(T,constraints[k],n,m,:stage) for k = 1:N-1]
     C          = [C...,  PartedVector(T,constraints[N],:terminal)]

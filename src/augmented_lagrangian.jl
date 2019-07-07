@@ -1,5 +1,5 @@
 "Augmented Lagrangian solve"
-function solve!(prob::Problem{T}, solver::AugmentedLagrangianSolver{T}) where T
+function solve!(prob::Problem{T,Discrete}, solver::AugmentedLagrangianSolver{T}) where T<:AbstractFloat
     reset!(solver)
 
     solver_uncon = AbstractSolver(prob, solver.opts.opts_uncon)
@@ -13,13 +13,15 @@ function solve!(prob::Problem{T}, solver::AugmentedLagrangianSolver{T}) where T
             J = step!(prob_al, solver, solver_uncon)
 
             record_iteration!(prob, solver, J, solver_uncon)
+            converged = evaluate_convergence(solver)
             println(logger,OuterLoop)
-            evaluate_convergence(solver) ? break : nothing
+            converged ? break : nothing
         end
     end
+    return solver
 end
 
-function solve!(prob::Problem{T},opts::AugmentedLagrangianSolverOptions{T}) where T
+function solve!(prob::Problem{T,Discrete},opts::AugmentedLagrangianSolverOptions{T}) where T<:AbstractFloat
     !is_constrained(prob) ? solver = AbstractSolver(prob,opts.opts_uncon) : solver = AbstractSolver(prob,opts)
     solve!(prob,solver)
 end
@@ -57,7 +59,12 @@ end
 
 "Evaluate maximum constraint violation as metric for Augmented Lagrangian solve convergence"
 function evaluate_convergence(solver::AugmentedLagrangianSolver{T}) where T
-    solver.stats[:c_max][end] < solver.opts.constraint_tolerance ? true : false
+    converged = false
+    if solver.opts.kickout_max_penalty
+        converged = (max_penalty(solver) == solver.opts.penalty_max ?
+            begin @logmsg OuterLoop "Max Penalty"; true end : false)
+    end
+    converged || (solver.stats[:c_max][end] < solver.opts.constraint_tolerance ? true : false)
 end
 
 function record_iteration!(prob::Problem{T}, solver::AugmentedLagrangianSolver{T}, J::T,
@@ -75,6 +82,10 @@ function record_iteration!(prob::Problem{T}, solver::AugmentedLagrangianSolver{T
     @logmsg OuterLoop :total value=solver.stats[:iterations_total]
     @logmsg OuterLoop :cost value=J
     @logmsg OuterLoop :c_max value=c_max
+end
+
+function max_penalty(solver::AugmentedLagrangianSolver)
+    maximum(maximum(solver.μ))
 end
 
 "Saturate a vector element-wise with upper and lower bounds"
@@ -157,20 +168,14 @@ function max_violation(solver::AugmentedLagrangianSolver{T}) where T
             end
         end
     end
-    # if length(solver.C[N]) > 0
-    #     c_max = max(norm(C[N].equality,Inf), c_max)
-    #     if length(C[N].inequality) > 0
-    #         c_max = max(pos(maximum(C[N].inequality)), c_max)
-    #     end
-    # end
     return c_max
 end
 
 function cost_expansion!(Q::ExpansionTrajectory{T},obj::AugmentedLagrangianObjective{T},
-        X::VectorTrajectory{T},U::VectorTrajectory{T}) where T
+        X::VectorTrajectory{T},U::VectorTrajectory{T},H::Vector{T}) where T
     N = length(X)
 
-    cost_expansion!(Q, obj.cost, X, U)
+    cost_expansion!(Q, obj.cost, X, U, H)
 
     for k = 1:N-1
         c = obj.C[k]
@@ -211,33 +216,9 @@ function cost_expansion!(Q::ExpansionTrajectory{T},obj::AugmentedLagrangianObjec
     return nothing
 end
 
-# function cost_expansion!(S::Expansion{T},obj::AugmentedLagrangianObjective{T},x::AbstractVector{T}) where T
-#     N = length(obj.μ)
-#     cost_expansion!(S,obj[N],x)
-#
-#     c = obj.C[N]
-#     λ = obj.λ[N]
-#     μ = obj.μ[N]
-#     a = active_set(c,λ)
-#     Iμ = Diagonal(a .* μ)
-#     cx = obj.∇C[N]
-#
-#     jacobian!(cx,obj.constraints[N],x)
-#
-#     # Second Order pieces
-#     S.xx .+= cx'Iμ*cx
-#
-#     # First order pieces
-#     S.x .+= cx'*(Iμ*c + λ)
-#
-#     return nothing
-# end
-
-
 function update_active_set!(obj::AugmentedLagrangianObjective{T},tol::T=0.0) where T
     update_active_set!(obj.active_set,obj.C,obj.λ,tol)
 end
-
 
 
 "Cost function terms for Lagrangian and quadratic penalty"
@@ -256,9 +237,9 @@ function stage_constraint_cost(c,λ,μ,
 end
 
 "Augmented Lagrangian cost for X and U trajectories"
-function cost(obj::AugmentedLagrangianObjective{T},X::VectorTrajectory{T},U::VectorTrajectory{T}) where T <: AbstractFloat
+function cost(obj::AugmentedLagrangianObjective{T},X::VectorTrajectory{T},U::VectorTrajectory{T}, H::Vector{T}) where T <: AbstractFloat
     N = length(X)
-    J = cost(obj.cost,X,U)
+    J = cost(obj.cost,X,U,H)
 
     update_constraints!(obj.C,obj.constraints, X, U)
     update_active_set!(obj)
@@ -267,7 +248,6 @@ function cost(obj::AugmentedLagrangianObjective{T},X::VectorTrajectory{T},U::Vec
     for k = 1:N-1
         Jc += stage_constraint_cost(obj.C[k], obj.λ[k], obj.μ[k],obj.active_set[k],X[k],U[k])
     end
-    Jc /= (N-1.0)
 
     Jc += stage_constraint_cost(obj.C[N], obj.λ[N], obj.μ[N],obj.active_set[N],X[N])
 

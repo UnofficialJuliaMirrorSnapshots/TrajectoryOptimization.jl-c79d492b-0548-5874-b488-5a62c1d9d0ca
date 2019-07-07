@@ -28,13 +28,15 @@ using Rotations
 using BlockArrays
 
 export
-    Dynamics
+    Dynamics,
+    Problems
 
 # Primary types
 export
     Model,
     QuadraticCost,
     LQRCost,
+    LQRObjective,
     GenericCost,
     Trajectory
 
@@ -46,9 +48,12 @@ export
     AugmentedLagrangianSolverOptions,
     AugmentedLagrangianProblem,
     ALTROSolverOptions,
-    DirectSolver,
+    DIRCOLSolver,
+    DIRCOLSolverOptions,
     ProjectedNewtonSolver,
     ProjectedNewtonSolverOptions,
+    SequentialNewtonSolver,
+    DIRTRELSolver,
     Discrete,
     Continuous,
     Constraint,
@@ -116,7 +121,8 @@ export
     bounds,
     labels,
     terminal,
-    stage
+    stage,
+    interp_rows
 
 # Trajectory Types
 Trajectory{T} = Vector{T} where T <: AbstractArray
@@ -127,7 +133,6 @@ DiagonalTrajectory{T} = Vector{Diagonal{T,Vector{T}}} where T <: Real
 PartedVecTrajectory{T} = Vector{PartedVector{T,Vector{T}}}
 PartedMatTrajectory{T} = Vector{PartedMatrix{T,Matrix{T}}}
 
-include("solver_options.jl")
 include("constraints.jl")
 include("cost.jl")
 include("model.jl")
@@ -145,12 +150,9 @@ include("augmented_lagrangian.jl")
 include("minimum_time.jl")
 include("infeasible.jl")
 include("dynamics.jl")
+include("problems.jl")
 include("logger.jl")
 
-include("solvers/direct/direct_solvers.jl")
-include("solvers/direct/dircol.jl")
-include("solvers/direct/dircol_ipopt.jl")
-include("solvers/direct/moi.jl")
 
 write_ipopt_options()
 end

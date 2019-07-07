@@ -9,7 +9,7 @@ T = Float64
 # model
 model = TrajectoryOptimization.Dynamics.car_model
 n = model.n; m = model.m
-model_d = Model{Discrete}(model,rk4)
+model_d = discretize_model(model,:rk4)
 
 # cost
 Q = Array(1e-3*Diagonal(I,n))
@@ -17,13 +17,13 @@ R = Array(1e-3*Diagonal(I,m))
 Qf = Array(Diagonal(I,n)*100.0)
 x0 = zeros(n)
 xf = [0.0;1.0;0.0]
-lqr_cost = LQRCost(Q,R,Qf,xf)
 
 # problem
 N = 31
 U = [ones(m) for k = 1:N-1]
+obj = TrajectoryOptimization.LQRObjective(Q,R,Qf,xf,N)
 dt = 0.15
-prob = Problem(model_d,Objective(lqr_cost,N),U,dt=dt,x0=x0)
+prob = Problem(model_d,obj,U,dt=dt,x0=x0)
 rollout!(prob)
 
 ## unconstrained

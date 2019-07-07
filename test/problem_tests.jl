@@ -3,7 +3,7 @@ import TrajectoryOptimization: planar_obstacle_constraint
 
 # Discretize the model
 T = Float64
-integration = :rk4
+integration = :rk3
 model = Dynamics.quadrotor_model
 n = model.n; m = model.m
 
@@ -37,22 +37,20 @@ num_constraints(pcon)
 @test num_constraints(pcon) == [ones(N-1)*(2m+1); n+1]
 
 # Create Objective
-costfun = LQRCost(Q, R, Qf, xf)
-obj = Objective(costfun, N)
+obj = TrajectoryOptimization.LQRObjective(Q,R,Qf,xf,N)
+
 
 # Initial state and control
 U0 = [ones(m) for k = 1:N-1]
 X0 = [copy(x0) for k = 1:N]
 
 # Test model discretization
-@test_nowarn Model{Discrete}(model, rk4)
 @test_nowarn rk3(model)
-model_d = Model{Discrete}(model, rk3)
+model_d = rk3(model)
 
 # Create Problem from continuous model
 @test_throws ArgumentError Problem(model, obj)  # needs N and another time indicator
 prob = Problem(model, obj, tf=3.0)
-@test prob.model.info[:integration] == :rk4
 @test prob.N == N
 @test prob.dt == 0.3
 
@@ -70,16 +68,19 @@ prob = Problem(model, obj, X0, U0, integration=:none, constraints=pcon, tf=3)
 @test prob isa Problem{T, Continuous} where T
 
 # Create Problem from discrete model
-prob = Problem(model_d, Objective(costfun,N), tf=5, N=N)
+prob = Problem(model_d, obj, tf=5, N=N)
 @test prob.model.info[:integration] == :rk3
 
-prob = Problem(model_d, Objective(costfun, 101), N=101, tf=5)
-@test prob.dt == 0.05
-@test length(prob.X) == 101
-@test length(prob.U) == 100
+N2 = 101
+obj2 = TrajectoryOptimization.LQRObjective(Q,R,Qf,xf,N2)
 
-@test_nowarn Problem(model_d, Objective(costfun,N), X0, U0, N=N, tf=5)
-@test_nowarn Problem(model_d, Objective(costfun,N), U0, N=N, tf=5)
+prob = Problem(model_d, obj2, N=N2, tf=5)
+@test prob.dt == 0.05
+@test length(prob.X) == N2
+@test length(prob.U) == N2-1
+
+@test_nowarn Problem(model_d, obj, X0, U0, N=N, tf=5)
+@test_nowarn Problem(model_d, obj, U0, N=N, tf=5)
 U0 = rand(m,N)
 disable_logging(Logging.Debug)
 prob = (@test_logs (:info, "Length of U should be N-1, not N. Trimming last entry") Problem(model_d, obj, U0, N=N, tf=3))
@@ -122,7 +123,7 @@ rollout!(prob)
 @test isfinite(max_violation(prob))
 
 # Test integrating the problem
-prob = Problem(model, obj, integration=:none, tf=3)
+prob = Problem(model, obj, tf=3)
 prob_d = rk3(prob)
 @test prob_d isa Problem{T,Discrete} where T
 @test prob_d.model.info[:integration] == :rk3
