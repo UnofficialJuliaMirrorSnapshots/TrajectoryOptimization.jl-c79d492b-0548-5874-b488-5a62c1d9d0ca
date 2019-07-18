@@ -1,4 +1,3 @@
-
 export
     DIRCOLSolver
 
@@ -11,9 +10,13 @@ abstract type Midpoint <: QuadratureRule end
 
 include("primals.jl")
 
+"$(TYPEDEF) Solver options for the Projected Newton solver"
 @with_kw mutable struct ProjectedNewtonSolverOptions{T} <: DirectSolverOptions{T}
     "Print output to console"
     verbose::Bool = true
+
+    "Solve type, feasibile or optimal"
+    solve_type::Symbol = :feasible
 
     "Tolerance for checking active inequality constraints. Positive values move the boundary further into the feasible region (i.e. negative)"
     active_set_tolerance = 1e-3
@@ -26,6 +29,12 @@ end
 $(TYPEDEF)
 Projected Newton Solver
 Direct method developed by the REx Lab at Stanford University
+
+Achieves machine-level constraint satisfaction by projecting onto the feasible subspace.
+    It can also take a full Newton step by solving the KKT system.
+
+This solver is to be used exlusively for solutions that are close to the optimal solution.
+    It is intended to be used as a "solution polishing" method for augmented Lagrangian methods.
 """
 struct ProjectedNewtonSolver{T} <: DirectSolver{T}
     opts::ProjectedNewtonSolverOptions{T}
@@ -65,7 +74,7 @@ function AbstractSolver(prob::Problem{T,D}, opts::ProjectedNewtonSolverOptions{T
     y_part = ones(Int,2,N-1)*n
     y_part[2,:] = p[1:end-1]
     y_part = vec(y_part)
-    insert!(y_part,1,3)
+    insert!(y_part,1,n)
     push!(y_part, p[N])
     c_blocks = push!(collect(3:2:length(y_part)),length(y_part))
 
@@ -80,7 +89,6 @@ function AbstractSolver(prob::Problem{T,D}, opts::ProjectedNewtonSolverOptions{T
     y = PseudoBlockArray(zeros(sum(y_part)),y_part)
     a = PseudoBlockArray(ones(Bool,NN+P), [NN; y_part])
 
-
     # Build views
     fVal = [view(y,Block(i)) for i in d_blocks]
     ∇F = [PartedMatrix(zeros(n,n+m+1), part_f) for k = 1:N]
@@ -94,39 +102,6 @@ function AbstractSolver(prob::Problem{T,D}, opts::ProjectedNewtonSolverOptions{T
     a = PartedVector(a, part_a)
 
     solver = ProjectedNewtonSolver{T}(opts, Dict{Symbol,Any}(), V, H, g, Y, y, fVal, ∇F, C, ∇C, a, active_set, part_a)
-    reset!(solver)
-    return solver
-
-    C = [PartedArray(view(y, N*n + pcum[k] .+ (1:p[k])), create_partition(constraints[k], k==N ? :terminal : :stage))  for k = 1:N]
-    active_set = [PartedArray(view(a.A, NN + N*n + pcum[k] .+ (1:p[k])), create_partition(constraints[k], k==N ? :terminal : :stage))  for k = 1:N]
-    ∇C = [begin
-    if k == N
-        d2 = n
-        stage = :terminal
-    else
-        d2 = n+m
-        stage = :stage
-    end
-    part = create_partition2(constraints[k], n, m, stage)
-    PartedArray(view(Y, N*n + pcum[k] .+ (1:p[k]), (k-1)*(n+m) .+ (1:d2)), part)
-end for k = 1:N]
-
-    # Create Trajectories
-    Q          = [k < N ? Expansion(prob) : Expansion(prob,:x) for k = 1:N]
-    ∇F         = [PartedMatrix(zeros(n,n+m+1),part_f)       for k = 1:N]
-    C          = [PartedVector(T,constraints[k],:stage)     for k = 1:N-1]
-    ∇C         = [PartedMatrix(T,constraints[k],n,m,:stage) for k = 1:N-1]
-    a          = [PartedVector(Bool,constraints[k],:stage)     for k = 1:N-1]
-    C          = [C...,  PartedVector(T,constraints[N],:terminal)]
-    ∇C         = [∇C..., PartedMatrix(T,constraints[N],n,m,:terminal)]
-    a          = [a...,  PartedVector(Bool,constraints[N],:terminal)]
-
-    c_term = terminal(constraints[N])
-    p_N = num_constraints(c_term)
-    fVal = [zeros(T,n) for k = 1:N]
-    p = num_constraints(prob)
-
-    solver = ProjectedNewtonSolver{T}(opts, Dict{Symbol,Any}(), V, Q, fVal, ∇F, C, ∇C, a, p)
     reset!(solver)
     return solver
 end
@@ -146,7 +121,7 @@ function num_active_constraints(solver::ProjectedNewtonSolver)
 end
 
 
-
+"$(TYPEDEF) Solver options for the Direct Collocation solver. Most options are passed to the NLP through the `opts` dictionary"
 @with_kw mutable struct DIRCOLSolverOptions{T} <: DirectSolverOptions{T}
     "NLP Solver to use. See MathOptInterface for available NLP solvers"
     nlp::Symbol = :Ipopt
@@ -164,6 +139,7 @@ end
 $(TYPEDEF)
 Direct Collocation Solver.
 Uses a commerical NLP solver to solve the Trajectory Optimization problem.
+Uses the MathOptInterface to interface with the NLP.
 """
 struct DIRCOLSolver{T,Q} <: DirectSolver{T}
     opts::DIRCOLSolverOptions{T}

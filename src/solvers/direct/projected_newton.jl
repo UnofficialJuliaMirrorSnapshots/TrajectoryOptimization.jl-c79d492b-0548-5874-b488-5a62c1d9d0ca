@@ -1,14 +1,28 @@
-cost(prob::Problem, V::Union{PrimalDual,PrimalDualVars}) = cost(prob.obj, V.X, V.U)
+
+
+############################
+#          SOLVE           #
+############################
+function solve!(prob::Problem, solver::ProjectedNewtonSolver)
+    V_ = newton_step!(prob, solver)
+    copyto!(prob.X, V_.X)
+    copyto!(prob.U, V_.U)
+    # projection!(prob)
+    return solver
+end
+
+
+cost(prob::Problem, V::Union{PrimalDual,PrimalDualVars}) = cost(prob.obj, V.X, V.U, get_dt_traj(prob,V.U))
 
 ############################
 #       CONSTRAINTS        #
 ############################
 function dynamics_constraints!(prob::Problem, solver::DirectSolver, V=solver.V)
     N = prob.N
-    X,U = V.X, V.U
+    X,U,dt = V.X, V.U, get_dt_traj(prob, V.U)
     solver.fVal[1] .= V.X[1] - prob.x0
     for k = 1:N-1
-         evaluate!(solver.fVal[k+1], prob.model, X[k], U[k], prob.dt)
+         evaluate!(solver.fVal[k+1], prob.model, X[k], U[k], dt[k])
          solver.fVal[k+1] .-= X[k+1]
      end
  end
@@ -16,7 +30,7 @@ function dynamics_constraints!(prob::Problem, solver::DirectSolver, V=solver.V)
 
 function dynamics_jacobian!(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V)
     n,m,N = size(prob)
-    X,U = V.X, V.U
+    X,U, dt = V.X, V.U, get_dt_traj(prob,V.U)
     solver.∇F[1].xx .= Diagonal(I,n)
     solver.Y[1:n,1:n] .= Diagonal(I,n)
     part = (x=1:n, u =n .+ (1:m), x1=n+m .+ (1:n))
@@ -24,7 +38,7 @@ function dynamics_jacobian!(prob::Problem, solver::ProjectedNewtonSolver, V=solv
     off1 = n
     off2 = 0
     for k = 1:N-1
-        jacobian!(solver.∇F[k+1], prob.model, X[k], U[k], prob.dt)
+        jacobian!(solver.∇F[k+1], prob.model, X[k], U[k], dt[k])
         solver.Y[off1 .+ part.x, off2 .+ part.x] .= solver.∇F[k+1].xx
         solver.Y[off1 .+ part.x, off2 .+ part.u] .= solver.∇F[k+1].xu
         solver.Y[off1 .+ part.x, off2 .+ part.x1] .= -Diagonal(I,n)
@@ -93,6 +107,7 @@ function cost_expansion!(prob::Problem, solver::ProjectedNewtonSolver, V=solver.
     NN = N*n + (N-1)*m
     H = solver.H
     g = solver.g
+    dt = get_dt_traj(prob,V.U)
 
     part = (x=1:n, u=n .+ (1:m), z=1:n+m)
     part2 = (xx=(part.x, part.x), uu=(part.u, part.u), ux=(part.u, part.x), xu=(part.x, part.u))
@@ -104,12 +119,14 @@ function cost_expansion!(prob::Problem, solver::ProjectedNewtonSolver, V=solver.
         # H[off .+ part.u, off .+ part.u] = Q[k].uu
         hess = PartedMatrix(view(H, off .+ part.z, off .+ part.z), part2)
         grad = PartedVector(view(g, off .+ part.z), part)
-        hessian!(hess, prob.obj[k], V.X[k], V.U[k])
-        gradient!(grad, prob.obj[k], V.X[k], V.U[k])
+        hessian!(hess, prob.obj[k], V.X[k], V.U[k],dt[k])
+        gradient!(grad, prob.obj[k], V.X[k], V.U[k],dt[k])
+        # hess .*= dt[k]
+        # grad .*= dt[k]
         off += n+m
     end
-    H ./= (N-1)
-    g ./= (N-1)
+    # H .*= prob.dt
+    # g .*= prob.dt
     hess = PartedMatrix(view(H, off .+ part.x, off .+ part.x), part2)
     grad = PartedVector(view(g, off .+ part.x), part)
     hessian!(hess, prob.obj[N], V.X[N])
@@ -164,6 +181,130 @@ function calc_violations(solver::ProjectedNewtonSolver{T}) where T
     return v
 end
 
+function projection_solve!(prob, solver, V=solver.V, active_set_update=true)
+    eps_feasible = solver.opts.feasibility_tolerance
+    viol = norm(solver.y[solver.a.duals], Inf)
+    max_projection_iters = 10
+
+    count = 0
+    while count < max_projection_iters && viol > eps_feasible
+        viol = _projection_solve!(prob, solver, V, active_set_update)
+        count += 1
+    end
+    return viol
+end
+
+
+function _projection_solve!(prob::Problem, solver::ProjectedNewtonSolver,
+        V=solver.V, active_set_update=true)
+    Z = primals(V)
+    λ = duals(V)
+    a = solver.a.duals
+    max_refinements = 10
+    convergence_rate_threshold = 1.1
+    ρ = 1e-2
+
+    # cost_expansion!(prob, solver, V)
+    H = Diagonal(solver.H)
+
+    dynamics_constraints!(prob, solver, V)
+    update_constraints!(prob, solver, V)
+    dynamics_jacobian!(prob, solver, V)
+    constraint_jacobian!(prob, solver, V)
+    if active_set_update
+        active_set!(prob, solver)
+    end
+    Y,y = active_constraints(prob, solver)
+    viol0 = norm(y,Inf)
+    if solver.opts.verbose
+        println("feas0: $viol0")
+    end
+
+    HinvY = H\Y'
+    S = Symmetric(Y*HinvY)
+    Sreg = cholesky(S + ρ*I)
+    viol_prev = viol0
+    count = 0
+    while count < max_refinements
+        viol = _projection_linesearch!(prob, solver, V, (S,Sreg), HinvY)
+        convergence_rate = log10(viol)/log10(viol_prev)
+        viol_prev = viol
+        count += 1
+
+        if solver.opts.verbose
+            println("conv rate: $convergence_rate")
+        end
+
+        if convergence_rate < convergence_rate_threshold ||
+                       viol < solver.opts.feasibility_tolerance
+            break
+        end
+    end
+
+    solver.stats[:S] = Sreg
+    return viol_prev
+end
+
+function _projection_linesearch!(prob::Problem, solver::ProjectedNewtonSolver,
+        V, S, HinvY)
+    a = solver.a.duals
+    y = solver.y[a]
+    viol0 = norm(y,Inf)
+    viol = Inf
+    ρ = 1e-4
+
+    Z = primals(V)
+    V_ = copy(V)
+    Z_ = primals(V_)
+    α = 1.0
+    ϕ = 0.5
+    count = 1
+    while true
+        δλ = reg_solve(S[1],y,S[2],1e-8,25)
+        δZ = -HinvY*δλ
+        Z_ .= Z + α*δZ
+
+        dynamics_constraints!(prob, solver, V_)
+        update_constraints!(prob, solver, V_)
+        y = solver.y[a]
+        viol = norm(y,Inf)
+
+        if solver.opts.verbose
+            println("feas: $viol")
+        end
+        if viol < viol0 || count > 10
+            break
+        else
+            count += 1
+            α *= ϕ
+        end
+    end
+    copyto!(Z,Z_)
+    return viol
+end
+
+reg_solve(A, b, reg::Real, tol=1e-10, max_iters=10) = reg_solve(A, b, A + reg*I, tol, max_iters)
+function reg_solve(A, b, B, tol=1e-10, max_iters=10)
+    x = B\b
+    count = 0
+    while count < max_iters
+        r = b - A*x
+        # println("r_norm = $(norm(r))")
+
+        if norm(r) < tol
+            break
+        else
+            x += B\r
+            count += 1
+        end
+    end
+    # println("iters = $count")
+
+    return x
+end
+
+
+
 function projection!(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V, active_set_update=true)
     Z = primals(V)
     eps_feasible = solver.opts.feasibility_tolerance
@@ -195,6 +336,54 @@ function projection!(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V, a
     end
 end
 
+function primaldual_projection!(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V, active_set_update=true)
+    Z = primals(V)
+    λ = duals(V)
+    a = solver.a.duals
+    eps_feasible = solver.opts.feasibility_tolerance
+    count = 0
+    ρ = 1e-6
+
+    # cost_expansion!(prob, solver, V)
+    H = Diagonal(solver.H)
+
+    while true
+        dynamics_constraints!(prob, solver, V)
+        update_constraints!(prob, solver, V)
+        dynamics_jacobian!(prob, solver, V)
+        constraint_jacobian!(prob, solver, V)
+        if active_set_update
+            active_set!(prob, solver)
+        end
+        Y,y = active_constraints(prob, solver)
+        HinvY = H\Y'
+
+        viol = norm(y,Inf)
+        if solver.opts.verbose
+            println("feas: ", viol)
+        end
+        if viol < eps_feasible || count > 10
+            if count == 0
+                solver.stats[:S] = cholesky(Symmetric(Y*HinvY) + ρ*I)
+            end
+            break
+        else
+            λa = view(λ,a)
+
+            S = cholesky(Symmetric(Y*HinvY) + ρ*I)
+            δλ = S\y
+            δZ = -HinvY*δλ
+
+            Z .+= δZ
+            λa .+= δλ
+            count += 1
+
+            solver.stats[:S] = S
+        end
+    end
+end
+
+
 function multiplier_projection!(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V)
     g = solver.g
     a = solver.a.duals
@@ -223,6 +412,7 @@ function solveKKT(prob::Problem, solver::ProjectedNewtonSolver, V=solver.V)
     return δV
 end
 
+using SuiteSparse
 function solveKKT_Shur(prob::Problem, solver::ProjectedNewtonSolver, Hinv, V=solver.V)
     a = solver.a
     δV = zero(V.V)
@@ -232,8 +422,7 @@ function solveKKT_Shur(prob::Problem, solver::ProjectedNewtonSolver, Hinv, V=sol
     r = g + Y'λ
 
     YHinv = Y*Hinv
-    S0 = Symmetric(YHinv*Y')
-    L = cholesky(S0)
+    L = solver.stats[:S]::SuiteSparse.CHOLMOD.Factor{Float64}
     δλ = L\(y-YHinv*r)
     δz = -Hinv*(r+Y'δλ)
 
@@ -261,10 +450,12 @@ function line_search(prob::Problem, solver::ProjectedNewtonSolver, δV)
     solver.opts.verbose ? println("res0: $res0") : nothing
     while count < 10
         V_ = solver.V + α*δV
-        # projection!(prob, solver, V_)
 
         # Calculate residual
         projection!(prob, solver, V_)
+        # projection_solve!(prob, solver, V_)
+
+        cost_expansion!(prob, solver, V_)
         res, = multiplier_projection!(prob, solver, V_)
         J = cost(prob, V_)
 
@@ -287,8 +478,6 @@ end
 
 
 
-
-
 function newton_step!(prob::Problem, solver::ProjectedNewtonSolver)
     V = solver.V
     verbose = solver.opts.verbose
@@ -302,8 +491,15 @@ function newton_step!(prob::Problem, solver::ProjectedNewtonSolver)
 
     # Projection
     verbose ? println("\nProjection:") : nothing
-    projection!(prob, solver)
-    update!(prob, solver)
+    # primaldual_projection!(prob, solver)
+    projection_solve!(prob, solver)
+
+
+    if solver.opts.solve_type == :feasible
+        return solver.V
+    end
+
+    cost_expansion!(prob, solver)
     multiplier_projection!(prob, solver)
 
     # Solve KKT
@@ -357,13 +553,8 @@ function buildL(L::KKTFactors,y_part)
 end
 buildL(solver::SequentialNewtonSolver) = buildL(solver.L, dual_partition(solver))
 
-function buildY(solver::SequentialNewtonSolver)
+function buildY!(Y,solver::SequentialNewtonSolver)
     n,m,N = size(solver)
-    y_part = dual_partition(solver)
-    z_part = repeat([n,m],N-1)
-    push!(z_part,n)
-    NN = sum(z_part)
-    Pa = sum(y_part)
 
     # Get Active Jacobians
     xi,ui = 1:n, n .+ (1:m)
@@ -371,7 +562,6 @@ function buildY(solver::SequentialNewtonSolver)
     C = [solver.∇C[k][a[k],1:n] for k = 1:N]
     D = [solver.∇C[k][a[k],n+1:n+m] for k = 1:N-1]
 
-    Y = PseudoBlockArray(zeros(Pa,NN),y_part,z_part)
 
     Y[Block(1,1)] = Diagonal(I,n)
     for k = 1:N-1
@@ -383,4 +573,185 @@ function buildY(solver::SequentialNewtonSolver)
     end
     Y[Block(2N,2N-1)] = C[N]
     return Y
+end
+function buildY(solver::SequentialNewtonSolver)
+    y_part = dual_partition(solver)
+    z_part = repeat([n,m],N-1)
+    push!(z_part,n)
+    NN = sum(z_part)
+    Pa = sum(y_part)
+
+    Y = PseudoBlockArray(zeros(Pa,NN),y_part,z_part)
+    buildY!(Y,solver)
+    return Y
+end
+
+
+function buildS!(S,solver::SequentialNewtonSolver,C,D)
+    n,m,N = size(solver)
+    Qinv = solver.Qinv
+    Rinv = solver.Rinv
+    ∇F = view(solver.∇F,2:N)
+    p = sum.(solver.active_set)
+    pcum = insert!(cumsum(p), 1, 0)
+
+    dinds = 1:n
+    cinds = n .+ (1:p[1])
+    S[dinds,dinds] = Qinv[1]
+    S[dinds,n .+ dinds] = Qinv[1]*∇F[1].xx'
+    S[dinds,n .+ cinds] = Qinv[1]*C[1]'
+
+    for k = 1:N-1
+        off = pcum[k] + k*n
+        dinds = off .+ (1:n)
+        cinds = off + n .+ (1:p[k])
+        S[dinds,dinds] = ∇F[k].xx*Qinv[k]*∇F[k].xx' + ∇F[k].xu*Rinv[k]*∇F[k].xu' + Qinv[k+1]
+        S[dinds,cinds] = ∇F[k].xx*Qinv[k]*C[k]'     + ∇F[k].xu*Rinv[k]*D[k]'
+        S[cinds,cinds] = C[k]*Qinv[k]*C[k]'         + D[k]*Rinv[k]*D[k]'
+        if k < N-1
+            S[dinds,dinds .+ (p[k] + n)] = -Qinv[k+1]*∇F[k+1].xx'
+            S[dinds, (off + p[k] + 2n) .+ (1:p[k+1])] = -Qinv[k+1]*C[k+1]'
+        else
+            S[dinds, (off + p[k] + n) .+ (1:p[k+1])] = -Qinv[k+1]*C[k+1]'
+        end
+    end
+    off = pcum[N] + N*n
+    cinds = off .+ (1:p[N])
+    S[cinds,cinds] = C[N]*Qinv[N]*C[N]'
+    return S
+    return Symmetric(S)
+end
+function buildS(solver::SequentialNewtonSolver)
+    y_part = dual_partition(solver)
+
+    Pa = sum(y_part)
+    S = zeros(Pa,Pa)
+
+    C = [solver.∇C[k][a[k],1:n] for k = 1:N]
+    D = [solver.∇C[k][a[k],n+1:n+m] for k = 1:N-1]
+
+    buildS!(solver,C,D)
+    return S
+end
+
+function Sinds(solver::SequentialNewtonSolver)
+    n,m,N = size(solver)
+    y_part = dual_partition(solver)
+    inds = create_partition(Tuple(y_part))
+
+    A = [(0:0,0:0) for k = 1:N]
+    B = [(0:0,0:0) for k = 1:N]
+    C = [(0:0,0:0) for k = 1:N]
+    D = [(0:0,0:0) for k = 1:N]
+    E = [(0:0,0:0) for k = 1:N]
+
+    n,m,N = size(solver)
+    p = sum.(solver.active_set)
+    pcum = insert!(cumsum(p), 1, 0)
+
+    dinds = 1:n
+    cinds = n .+ (1:p[1])
+    A[1] = (dinds,dinds)
+    D[1] = (dinds,n .+ dinds)
+    E[1] = (dinds,n .+ cinds)
+
+    for k = 1:N-1
+        off = pcum[k] + k*n
+        dinds = off .+ (1:n)
+        cinds = off + n .+ (1:p[k])
+        A[k+1] = (dinds,dinds)
+        B[k+1] = (dinds,cinds)
+        C[k+1] = (cinds,cinds)
+        if k < N-1
+            D[k+1] = (dinds, dinds .+ (p[k] + n))
+            E[k+1] = (dinds, (off + p[k] + 2n) .+ (1:p[k+1]))
+        else
+            E[k+1] = (dinds, (off + p[k] + n) .+ (1:p[k+1]))
+        end
+    end
+    off = pcum[N] + N*n
+    cinds = off .+ (1:p[N])
+    C[1,1] = (cinds,cinds)
+    S_part = (A=A,B=B,C=C,D=D,E=E)
+end
+
+function buildS!(S, solver, A, B, C, D, inds::NamedTuple)
+    N = length(solver.Q)
+    Qinv = solver.Qinv
+    Rinv = solver.Rinv
+
+    S[inds.A[1]...] = Qinv[1]
+    S[inds.D[1]...] = Qinv[1]*A[1]'
+    S[inds.E[1]...] = Qinv[1]*C[1]'
+
+    for k = 1:N-1
+        S[inds.A[k+1]...] = A[k]*Qinv[k]*A[k]' + B[k]*Rinv[k]*B[k]' + Qinv[k+1]
+        S[inds.B[k+1]...] = A[k]*Qinv[k]*C[k]'     + B[k]*Rinv[k]*D[k]'
+        S[inds.C[k+1]...] = C[k]*Qinv[k]*C[k]'         + D[k]*Rinv[k]*D[k]'
+        if k < N-1
+            S[inds.D[k+1]...] = -Qinv[k+1]*A[k+1]'
+            S[inds.E[k+1]...] = -Qinv[k+1]*C[k+1]'
+        else
+            S[inds.E[k+1]...] = -Qinv[k+1]*C[k+1]'
+        end
+    end
+    S[inds.C[1]...] = C[N]*Qinv[N]*C[N]'
+    Symmetric(S)
+    return nothing
+    # return Symmetric(S)
+end
+
+
+
+
+
+function buildShurCompliment(prob::Problem, solver::SequentialNewtonSolver)
+    n,m,N = size(prob)
+
+    Qinv = solver.Qinv
+    Rinv = solver.Rinv
+
+    A = [F.xx for F in solver.∇F[2:end]]  # First jacobian is for initial condition
+    B = [F.xu for F in solver.∇F[2:end]]
+    C = [Array(F.x[a,:]) for (F,a) in zip(solver.∇C, solver.active_set)]
+    D = [Array(F.u[a,:]) for (F,a) in zip(solver.∇C, solver.active_set)]
+
+    P = num_active_constraints(solver)
+    S = spzeros(P,P)
+
+    _buildShurCompliment!(S, prob, solver, Qinv, Rinv, A, B, C, D)
+
+    return Symmetric(S)
+end
+
+function _buildShurCompliment!(S, prob::Problem, solver::SequentialNewtonSolver, Qinv, Rinv, A, B, C, D)
+    n,m,N = size(prob)
+
+    p = sum.(solver.active_set)
+    pcum = insert!(cumsum(p), 1, 0)
+
+    dinds = 1:n
+    cinds = n .+ (1:p[1])
+    S[dinds,dinds] = Qinv[1]
+    S[dinds,n .+ dinds] = Qinv[1]*A[1]'
+    S[dinds,n .+ cinds] = Qinv[1]*C[1]'
+
+    for k = 1:N-1
+        off = pcum[k] + k*n
+        dinds = off .+ (1:n)
+        cinds = off + n .+ (1:p[k])
+        S[dinds,dinds] = A[k]*Qinv[k]*A[k]' + B[k]*Rinv[k]*B[k]' + Qinv[k+1]
+        S[dinds,cinds] = A[k]*Qinv[k]*C[k]' + B[k]*Rinv[k]*D[k]'
+        S[cinds,cinds] = C[k]*Qinv[k]*C[k]' + D[k]*Rinv[k]*D[k]'
+        if k < N-1
+            S[dinds,dinds .+ (p[k] + n)] = -Qinv[k+1]*A[k+1]'
+            S[dinds, (off + p[k] + 2n) .+ (1:p[k+1])] = -Qinv[k+1]*C[k+1]'
+        else
+            S[dinds, (off + p[k] + n) .+ (1:p[k+1])] = -Qinv[k+1]*C[k+1]'
+        end
+    end
+    off = pcum[N] + N*n
+    cinds = off .+ (1:p[N])
+    S[cinds,cinds] = C[N]*Qinv[N]*C[N]'
+
 end

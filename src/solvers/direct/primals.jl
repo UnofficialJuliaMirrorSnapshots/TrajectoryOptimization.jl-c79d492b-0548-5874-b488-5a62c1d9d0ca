@@ -176,7 +176,7 @@ function PrimalDual(prob::Problem{T}) where T
     y_part = ones(Int,2,N-1)*n
     y_part[2,:] = p[1:end-1]
     y_part = vec(y_part)
-    insert!(y_part,1,3)
+    insert!(y_part,1,n)
     push!(y_part, p[N])
     y_inds = cumsum(y_part)
     insert!(y_inds,1,0)
@@ -211,7 +211,7 @@ function PrimalDual(V::Vector, n::Int, m::Int, p::Vector{Int}, N::Int) where T
     a = [view(active_set, p_colloc + pcum[k] .+ (1:p[k])) for k = 1:N]
     PrimalDual(V, Z, X, U, Y, ν, λ, active_set, a)
 end
-
+PrimalDual(V::Vector, prob::Problem) = PrimalDual(V, prob.model.n, prob.model.m, num_constraints(prob), prob.N)
 
 function Base.copy(V::PrimalDual)
     V2 = copy(V.V)

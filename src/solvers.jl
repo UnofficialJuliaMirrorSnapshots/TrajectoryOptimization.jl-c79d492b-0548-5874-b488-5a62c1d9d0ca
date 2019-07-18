@@ -17,6 +17,11 @@ include("solvers/direct/projected_newton.jl")
 
 include("solvers/altro.jl")
 
+include("solvers/direct/primals_mintime.jl")
+include("solvers/direct/direct_solvers_mintime.jl")
+include("solvers/direct/dircol_mintime.jl")
+include("solvers/direct/moi_mintime.jl")
+
 # Generic methods for calling solve
 
 function solve!(prob::Problem, opts::AbstractSolverOptions)
@@ -38,7 +43,7 @@ end
 
 
 jacobian!(prob::Problem{T,Continuous}, solver::AbstractSolver) where T = jacobian!(solver.∇F, prob.model, prob.X, prob.U)
-jacobian!(prob::Problem{T,Discrete},   solver::AbstractSolver) where T = jacobian!(solver.∇F, prob.model, prob.X, prob.U, prob.dt)
+jacobian!(prob::Problem{T,Discrete},   solver::AbstractSolver) where T = jacobian!(solver.∇F, prob.model, prob.X, prob.U, get_dt_traj(prob))
 
 
 function check_convergence_criteria(opts_uncon::AbstractSolverOptions{T},cost_tolerance::T,gradient_norm_tolerance::T) where T
