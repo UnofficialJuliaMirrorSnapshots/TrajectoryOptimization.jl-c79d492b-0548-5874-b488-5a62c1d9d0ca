@@ -1,23 +1,32 @@
 "Augmented Lagrangian solve"
 function solve!(prob::Problem{T,Discrete}, solver::AugmentedLagrangianSolver{T}) where T<:AbstractFloat
     reset!(solver)
+    t_start = time()
 
     solver_uncon = AbstractSolver(prob, solver.opts.opts_uncon)
 
     prob_al = AugmentedLagrangianProblem(prob, solver)
     logger = default_logger(solver)
 
+    rollout!(prob)
+
     with_logger(logger) do
+        record_iteration!(prob_al, solver, cost(prob_al), solver_uncon)
+        println(logger,OuterLoop)
         for i = 1:solver.opts.iterations
             set_tolerances!(solver,solver_uncon,i)
             J = step!(prob_al, solver, solver_uncon)
 
             record_iteration!(prob, solver, J, solver_uncon)
+
             converged = evaluate_convergence(solver)
             println(logger,OuterLoop)
             converged ? break : nothing
+
+            reset!(solver_uncon)
         end
     end
+    solver.stats[:time] = time() - t_start
     return solver
 end
 
@@ -45,9 +54,8 @@ function step!(prob::Problem{T}, solver::AugmentedLagrangianSolver{T},
         unconstrained_solver::AbstractSolver) where T
 
     # Solve the unconstrained problem
-    J = solve!(prob, unconstrained_solver)
-
-    reset!(unconstrained_solver)
+    solve!(prob, unconstrained_solver)
+    J = cost(prob)
 
     # Outer loop update
     dual_update!(prob, solver)
@@ -76,6 +84,7 @@ function record_iteration!(prob::Problem{T}, solver::AugmentedLagrangianSolver{T
     push!(solver.stats[:iterations_inner], unconstrained_solver.stats[:iterations])
     push!(solver.stats[:cost],J)
     push!(solver.stats[:c_max],c_max)
+    push!(solver.stats[:penalty_max],max_penalty(solver))
     push!(solver.stats_uncon, unconstrained_solver.stats)
 
     @logmsg OuterLoop :iter value=solver.stats[:iterations]

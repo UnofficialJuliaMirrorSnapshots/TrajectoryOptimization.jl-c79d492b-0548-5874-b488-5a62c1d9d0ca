@@ -2,12 +2,6 @@
 function solve!(prob::Problem, opts::ALTROSolverOptions) where T
     t0 = time()
 
-    # create ALTRO problem
-    prob_altro, state = altro_problem(prob,opts)
-
-    # Create ALTRO solver
-    solver = ALTROSolver(prob_altro, opts)
-
     # Set terminal condition if using projected newton
     if opts.projected_newton
         opts_al = opts.opts_al
@@ -19,6 +13,12 @@ function solve!(prob::Problem, opts::ALTROSolverOptions) where T
         end
     end
 
+    # create ALTRO problem
+    prob_altro, state = altro_problem(prob,opts)
+
+    # Create ALTRO solver
+    solver = ALTROSolver(prob_altro, opts)
+
     # primary solve (augmented Lagrangian)
     t_al = time()
     @info "Augmented Lagrangian solve..."
@@ -29,7 +29,12 @@ function solve!(prob::Problem, opts::ALTROSolverOptions) where T
     pn_solver = ProjectedNewtonSolver(prob_altro, opts.opts_pn)
     if opts.projected_newton
         @info "Projected Newton solve..."
-        solver = solve!(prob_altro, pn_solver)
+        # _pn_solver = solve!(prob_altro, pn_solver)
+        # return pn_solver, solver.solver_pn
+        # @assert pn_solver == solver.solver_pn
+
+        solver.solver_pn.V = PrimalDual(prob_altro)
+        solve!(prob_altro,solver.solver_pn)#pn_solver)
     end
     time_pn = time()- t_pn
 
@@ -74,7 +79,7 @@ function process_results!(prob::Problem{T},prob_altro::Problem{T},
         # update original problem (minimum time solve will return dt as controls at U[k][end])
         if state.minimum_time
             for k = 1:prob.N-1
-                prob.U[k] = [prob_altro.U[k][1:prob.model.m]; prob_altro.U[k][end]^2]
+                prob.U[k] = [prob_altro.U[k][1:prob.model.m]; prob_altro.U[k]]
             end
             # copyto!(prob.X,prob_altro.X,prob.model.n)
         end

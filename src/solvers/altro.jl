@@ -60,7 +60,7 @@ $(FIELDS)
 
     "constraint satisfaction tolerance that triggers the projected newton solver.
     If set to a non-positive number it will kick out when the maximum penalty is reached."
-    projected_newton_tolerance::T = 1e-3
+    projected_newton_tolerance::T = 1.0e-3
 
 end
 
@@ -82,7 +82,7 @@ end
 
 ALTROSolver(prob::Problem, opts::ALTROSolverOptions) = AbstractSolver(prob, opts)
 
-function AbstractSolver(prob::Problem{T},opts::ALTROSolverOptions{T}) where T
+function AbstractSolver(prob::Problem{T,D},opts::ALTROSolverOptions{T}) where {T<:AbstractFloat,D<:DynamicsType}
     stats = Dict{Symbol,Any}()
     solver_al = AugmentedLagrangianSolver(prob, opts.opts_al)
     solver_pn = ProjectedNewtonSolver(prob, opts.opts_pn)

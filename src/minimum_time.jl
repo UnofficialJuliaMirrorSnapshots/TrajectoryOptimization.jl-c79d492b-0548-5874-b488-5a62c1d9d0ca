@@ -72,11 +72,10 @@ end
 
 "Return the total duration of trajectory"
 function total_time(prob::Problem{T}) where T
-    m̄ = prob.model.m + 1
     tt = 0.0
-    try
-        tt = sum([prob.U[k][m̄] for k = 1:prob.N-1])
-    catch
+    if prob.tf == 0.
+        tt = sum([prob.U[k][end]^2 for k = 1:prob.N-1])
+    else
         tt = prob.dt*(prob.N-1)
     end
     return tt
@@ -153,8 +152,8 @@ struct MinTimeCost{T} <: CostFunction
     R_min_time::T
 end
 
-stage_cost(cost::MinTimeCost, x::Vector{T}, u::Vector{T}, h::T) where T = stage_cost(cost.cost,x[1:end-1],u[1:end-1],h) + cost.R_min_time*u[end]^2
-stage_cost(cost::MinTimeCost, xN::Vector{T}) where T = stage_cost(cost.cost,xN[1:end-1])
+stage_cost(cost::MinTimeCost, x, u, h) = stage_cost(cost.cost,x[1:end-1],u[1:end-1],h) + cost.R_min_time*u[end]^2
+stage_cost(cost::MinTimeCost, xN) = stage_cost(cost.cost,xN[1:end-1])
 
 get_sizes(cost::MinTimeCost) = get_sizes(cost.cost) .+ 1
 copy(cost::MinTimeCost) = MinTimeCost(copy(cost.cost),copy(cost.R_min_time))
@@ -215,21 +214,20 @@ function gradient!(grad, cost::MinTimeCost,
     dt = τ^2
     Qx = cost.cost.Q*x[idx.x] + cost.cost.q + cost.cost.H'*u[idx.u]
     Qu = cost.cost.R*u[idx.u] + cost.cost.r + cost.cost.H*x[idx.x]
-    Q.x[idx.x] .= Qx*dt
-    Q.u[idx.u] .= Qu*dt
+    grad[1:n] = Qx*dt
+    grad[(n+1) .+ (1:m)] = Qu*dt
 
     ℓ1 = stage_cost(cost.cost,x[idx.x],u[idx.u])
-    tmp = 2.0*τ*Qu
 
-    Q.u[end] = τ*(2.0*ℓ1 + R_min_time)
-    Q.x[end] = R_min_time*x[end]
+    grad[(n + 1 + m + 1)] = τ*(2.0*ℓ1 + R_min_time)
+    grad[(n+1)] = R_min_time*x[end]
 
     return nothing
 end
 
 function gradient!(grad, cost::MinTimeCost, xN::AbstractVector)
     R_min_time = cost.R_min_time
-
+    n, = get_sizes(cost.cost)
     idx = 1:n
     grad[idx] = cost.cost.Q*xN[idx] + cost.cost.q
     grad[end] = R_min_time*xN[end]
@@ -247,11 +245,13 @@ function hessian!(hess, cost::MinTimeCost,
         τ = u[end]
         dt = τ^2
 
-        hess.xx[idx.x,idx.x] .= cost.cost.Q*dt
-        hess.uu[idx.u,idx.u] .= cost.cost.R*dt
-        hess.ux[idx.u,idx.x] .= cost.cost.H*dt
+        hess.xx[idx.x,idx.x] = cost.cost.Q*dt
+        hess.uu[idx.u,idx.u] = cost.cost.R*dt
+        hess.ux[idx.u,idx.x] = cost.cost.H*dt
 
         ℓ1 = stage_cost(cost.cost,x[idx.x],u[idx.u])
+        Qu = cost.cost.R*u[idx.u] + cost.cost.r + cost.cost.H*x[idx.x]
+
         tmp = 2.0*τ*Qu
 
 
@@ -268,16 +268,12 @@ end
 
 function hessian!(hess, cost::MinTimeCost, xN::AbstractVector)
     @assert cost.cost isa QuadraticCost
-    n,m = get_sizes(cost.cost)
-    idx = (x=1:n,u=1:m)
+
+    n, = get_sizes(cost.cost)
     R_min_time = cost.R_min_time
-    τ = u[end]
-    dt = τ^2
 
-    hess[idx.x,idx.x] .= cost.cost.Q*dt
-
-    ℓ1 = stage_cost(cost.cost,x[idx.x],u[idx.u])
-    Qx = cost.cost.Q*x[idx.x] + cost.cost.q + cost.cost.H'*u[idx.u]
+    idx = 1:n
+    hess[idx,idx] = cost.cost.Q
 
     hess[end,end] = R_min_time
 

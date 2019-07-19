@@ -15,6 +15,9 @@ include("primals.jl")
     "Print output to console"
     verbose::Bool = true
 
+    "Number of Newton steps"
+    n_steps::Int = 1
+
     "Solve type, feasibile or optimal"
     solve_type::Symbol = :feasible
 
@@ -23,6 +26,7 @@ include("primals.jl")
 
     "Tolerance for constraint feasibility during projection"
     feasibility_tolerance = 1e-6
+
 end
 
 """
@@ -36,7 +40,7 @@ Achieves machine-level constraint satisfaction by projecting onto the feasible s
 This solver is to be used exlusively for solutions that are close to the optimal solution.
     It is intended to be used as a "solution polishing" method for augmented Lagrangian methods.
 """
-struct ProjectedNewtonSolver{T} <: DirectSolver{T}
+mutable struct ProjectedNewtonSolver{T} <: DirectSolver{T}
     opts::ProjectedNewtonSolverOptions{T}
     stats::Dict{Symbol,Any}
     V::PrimalDual{T}
@@ -55,7 +59,7 @@ struct ProjectedNewtonSolver{T} <: DirectSolver{T}
     parts::NamedTuple{(:primals,:duals),NTuple{2,UnitRange{Int}}}
 end
 
-function AbstractSolver(prob::Problem{T,D}, opts::ProjectedNewtonSolverOptions{T}) where {T,D}
+function AbstractSolver(prob::Problem{T,D}, opts::ProjectedNewtonSolverOptions{T}) where {T<:AbstractFloat,D<:DynamicsType}
     n,m,N = size(prob)
     X_ = [zeros(T,n) for k = 1:N-1] # midpoints
 
@@ -131,6 +135,9 @@ end
 
     "Print output to console"
     verbose::Bool = true
+
+    "Feasibility tolerance"
+    feasibility_tolerance::T = -1.0
 end
 
 
@@ -141,7 +148,7 @@ Direct Collocation Solver.
 Uses a commerical NLP solver to solve the Trajectory Optimization problem.
 Uses the MathOptInterface to interface with the NLP.
 """
-struct DIRCOLSolver{T,Q} <: DirectSolver{T}
+mutable struct DIRCOLSolver{T,Q} <: DirectSolver{T}
     opts::DIRCOLSolverOptions{T}
     stats::Dict{Symbol,Any}
     Z::Primals{T}
@@ -187,8 +194,9 @@ function AbstractSolver(prob::Problem, opts::DIRCOLSolverOptions, Z::Primals{T}=
 end
 
 function reset!(solver::DIRCOLSolver{T,Q}) where {T, Q<:QuadratureRule}
-    state = Dict{Symbol,Any}(:iterations=>0, :c_max=>T[], :cost=>T[])
+    # state = Dict{Symbol,Any}(:iterations=>0, :c_max=>T[], :cost=>T[])
     solver.stats[:iterations] = 0
     solver.stats[:c_max] = T[]
     solver.stats[:cost] = T[]
+    solver.stats[:iter_time] = T[]
 end

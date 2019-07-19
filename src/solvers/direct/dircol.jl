@@ -1,3 +1,50 @@
+function max_violation_dynamics(prob::Problem{T,Discrete})::T where T <: AbstractFloat
+    n = prob.model.n; m = prob.model.m
+    max_viol = norm(prob.X[1] - prob.x0,Inf)
+    X̄ = zeros(n)
+    for k = 1:prob.N-1
+        X̄ .= 0
+        evaluate!(X̄, prob.model, prob.X[k], prob.U[k][1:m], get_dt(prob,prob.U[k]))
+        max_viol = max(max_viol,norm(X̄ - prob.X[k+1],Inf))
+    end
+    return max_viol
+end
+
+# assume dircol solve for continuous problems and defaults to implicit rk3 integration
+function max_violation_dynamics(prob::Problem{T,Continuous})::T where T <:AbstractFloat
+    n,m,N = size(prob)
+    X̄ = zeros(prob.model.n)
+
+    fVal = [zeros(prob.model.n) for k = 1:N]
+    fValm = [zeros(prob.model.n) for k = 1:N]
+    Xm = [zeros(prob.model.n) for k = 1:N]
+    Um = [zeros(prob.model.m) for k = 1:N-1]
+    dt = get_dt_traj(prob,prob.U)
+
+    # Calculate midpoints
+    for k = 1:N
+        evaluate!(fVal[k], prob.model, prob.X[k], prob.U[k])
+    end
+    for k = 1:N-1
+        Xm[k] = (prob.X[k] + prob.X[k+1])/2 + dt[k]/8*(fVal[k] - fVal[k+1])
+        Um[k] = (prob.U[k][1:m] + prob.U[k+1][1:m])*0.5
+        evaluate!(fValm[k], prob.model, Xm[k], Um[k])
+    end
+
+    max_viol = norm(prob.X[1] - prob.x0,Inf)
+
+    for k = 1:N-1
+        mv = norm(-prob.X[k+1] + prob.X[k] + dt[k]*(fVal[k] + 4*fValm[k] + fVal[k+1])/6,Inf)
+        max_viol = max(max_viol,mv)
+    end
+
+    return max_viol
+end
+
+function max_violation_direct(prob::Problem)
+    max(max_violation(prob),max_violation_dynamics(prob))
+end
+
 """ $(SIGNATURES)
 Get the row and column lists of a sparse matrix, with ordered elements
 """
@@ -26,8 +73,6 @@ function gen_xm_cubic(prob::Problem)
     ẋ = zeros(prob.model.n); ẏ = zeros(prob.model.n)
 
     function xm(y,x,v,u,h)
-        ẋ = zero(x); ẏ = zero(y)
-
         prob.model.f(ẋ,x,u)
         prob.model.f(ẏ,y,v)
 
@@ -77,33 +122,16 @@ function gen_stage_cost_gradient(prob::Problem)
     dxmdv(y,x,v,u,h) = -h/8*dfcdu(y,v)
     dxmdu(y,x,v,u,h) = h/8*dfcdu(x,u)
 
-    # xm_aug(zz) = xm(zz[1:n],zz[n .+ (1:n)],zz[(2n) .+ (1:m)],zz[(2n+m) .+ (1:m)],zz[(2n+2m)+1])
-    # yy = rand(n); xx = rand(n); vv = rand(m); uu = rand(m); ddt = .23
-    # XM = ForwardDiff.jacobian(xm_aug,[yy;xx;vv;uu;ddt])
-    # @assert isapprox(XM[:,1:n],dxmdy(yy,xx,vv,uu,ddt))
-    # @assert isapprox(XM[:,n .+ (1:n)],dxmdx(yy,xx,vv,uu,ddt))
-    # @assert isapprox(XM[:,(2n) .+ (1:m)],dxmdv(yy,xx,vv,uu,ddt))
-    # @assert isapprox(XM[:,(2n+m) .+ (1:m)],dxmdu(yy,xx,vv,uu,ddt))
-    # isapprox(XM[:,(2n+2m) + 1],dxmdh(yy,xx,vv,uu,ddt))
 
-    # _obj = LQRObjective(3.2*Diagonal(ones(n)),1.7*Diagonal(ones(m)),16.4*Diagonal(ones(n)),rand(n),5)[1]
 
     dℓdx(obj,x,u) = obj.Q*x + obj.q + obj.H'*u
     dℓdu(obj,x,u) = obj.R*u + obj.r + obj.H*x
-
-    # gg(y,x,v,u,h) = h/6*(stage_cost(_obj,x,u) + 4*stage_cost(_obj,xm(y,x,v,u,h),0.5*(u+v)) + stage_cost(_obj,y,v))
-    # gg_aug(zz) = gg(zz[1:n],zz[n .+ (1:n)],zz[(2n) .+ (1:m)],zz[(2n+m) .+ (1:m)],zz[(2n+2m)+1])
 
     dgdx(obj,y,x,v,u,h) = h/6*(dℓdx(obj,x,u) + 4*dxmdx(y,x,v,u,h)'*dℓdx(obj,xm(y,x,v,u,h),0.5*(u+v)))
     dgdy(obj,y,x,v,u,h) = h/6*(4.0*dxmdy(y,x,v,u,h)'*dℓdx(obj,xm(y,x,v,u,h),0.5*(u+v))+ dℓdx(obj,y,v))
     dgdu(obj,y,x,v,u,h) = h/6*(dℓdu(obj,x,u) + 4*(dxmdu(y,x,v,u,h)'*dℓdx(obj,xm(y,x,v,u,h),0.5*(u+v)) + 0.5*dℓdu(obj,xm(y,x,v,u,h),0.5*(u+v))))
     dgdv(obj,y,x,v,u,h) = h/6*(4*(dxmdv(y,x,v,u,h)'*dℓdx(obj,xm(y,x,v,u,h),0.5*(u+v)) + 0.5*dℓdu(obj,xm(y,x,v,u,h),0.5*(u+v))) + dℓdu(obj,y,v))
 
-    # GM = ForwardDiff.gradient(gg_aug,[yy;xx;vv;uu;ddt])
-    # @assert isapprox(GM[1:n],dgdy(_obj,yy,xx,vv,uu,ddt))
-    # @assert isapprox(GM[n .+ (1:n)],dgdx(_obj,yy,xx,vv,uu,ddt))
-    # @assert isapprox(GM[(2n) .+ (1:m)],dgdv(_obj,yy,xx,vv,uu,ddt))
-    # @assert isapprox(GM[(2n+m) .+ (1:m)],dgdu(_obj,yy,xx,vv,uu,ddt))
 
     nn = 2*(n+m)
     _tmp_ = zeros(n)
@@ -114,11 +142,25 @@ function gen_stage_cost_gradient(prob::Problem)
         for k = 1:N-1
             obj = prob.obj[k]
             x = X[k]; y = X[k+1]; u = U[k]; v = U[k+1]; h = H[k]
+
+            _xm = xm(y,x,v,u,h)
+            _um = 0.5*(u+v)
+            _dℓdx = dℓdx(obj,x,u)
+            _dℓdu = dℓdu(obj,x,u)
+            _dℓdy = dℓdx(obj,y,v)
+            _dℓdv = dℓdu(obj,y,v)
+            _dℓmdx = dℓdx(obj,_xm,_um)
+            _dℓmdu = dℓdu(obj,_xm,_um)
+            _dxmdx = dxmdx(y,x,v,u,h)
+            _dxmdy = dxmdy(y,x,v,u,h)
+            _dxmdu = dxmdu(y,x,v,u,h)
+            _dxmdv = dxmdv(y,x,v,u,h)
+
             _∇g = view(∇g,shift .+ (1:nn))
-            _∇g[1:n] += dgdx(obj,y,x,v,u,h)
-            _∇g[n .+ (1:m)] += dgdu(obj,y,x,v,u,h)
-            _∇g[(n+m) .+ (1:n)] += dgdy(obj,y,x,v,u,h)
-            _∇g[(2*n+m) .+ (1:m)] += dgdv(obj,y,x,v,u,h)
+            _∇g[1:n] += h/6*(_dℓdx + 4*_dxmdx'*_dℓmdx)
+            _∇g[n .+ (1:m)] += h/6*(_dℓdu + 4*(_dxmdu'*_dℓmdx + 0.5*_dℓmdu))
+            _∇g[(n+m) .+ (1:n)] += h/6*(4.0*_dxmdy'*_dℓmdx + dℓdx(obj,y,v))
+            _∇g[(2*n+m) .+ (1:m)] += h/6*(4*(_dxmdv'*_dℓmdx + 0.5*_dℓmdu) + dℓdu(obj,y,v))
             shift += (n+m)
         end
 
@@ -426,8 +468,17 @@ function remove_bounds!(prob::Problem)
             bounds[k] = bnd[1]::BoundConstraint
         end
     end
-
+if :goal ∈ labels(prob.constraints[N])
+        goal = pop!(prob.constraints[N])
+        xf = zeros(n)
+        evaluate!(xf, goal, zero(xf))
+        term_bound = BoundConstraint(n,m, x_min=-xf, u_min=bounds[N-1].u_min,
+                                          x_max=-xf, u_max=bounds[N-1].u_max)
+        bounds[N] = term_bound::BoundConstraint
+    end
     # Terminal time step
+    #TODO handle control at Nth U differently
+
     if :goal ∈ labels(prob.constraints[N])
         goal = pop!(prob.constraints[N])
         xf = zeros(n)
@@ -454,6 +505,11 @@ function get_bounds(prob::Problem, bounds::Vector{<:BoundConstraint})
         x_L[k] = bounds[k].x_min
         u_U[k] = bounds[k].u_max
         u_L[k] = bounds[k].u_min
+    end
+    #TODO handle control at Nth U differently
+    if Z.equal
+        u_U[N] = bounds[N-1].u_max
+        u_L[N] = bounds[N-1].u_min
     end
     if !Z.equal
         x_U = bounds[N].x_max

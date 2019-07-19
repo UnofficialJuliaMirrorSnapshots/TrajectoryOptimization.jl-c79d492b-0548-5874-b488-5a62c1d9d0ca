@@ -1,12 +1,4 @@
-using TrajectoryOptimization
 import TrajectoryOptimization: get_dt_traj
-const TO = TrajectoryOptimization
-using Test
-using ForwardDiff
-using LinearAlgebra
-using PartedArrays
-using SparseArrays
-using Ipopt
 
 # Set up problem
 model = Dynamics.car_model
@@ -38,7 +30,7 @@ prob = TO.update_problem(prob, model=model)
 
 
 # Create DIRCOL Solver
-opts = TO.DIRCOLSolverOptions{Float64}(verbose=true)
+opts = TO.DIRCOLSolverOptions{Float64}(verbose=false)
 pcon = prob.constraints
 dircol = TO.DIRCOLSolver(prob, opts)
 
@@ -95,7 +87,7 @@ X,U = Z.X, Z.U
 @test Z.X isa TrajectoryOptimization.AbstractVectorTrajectory
 @test typeof(Z.X) <: Vector{S} where S <: AbstractVector
 initial_controls!(prob, Z.U)
-initial_state!(prob, Z.X)
+TO.initial_states!(prob, Z.X)
 @test cost(prob, dircol) == cost(prob)
 
 # Collocation constraints
@@ -233,16 +225,5 @@ Z_L = Primals(z_L, part_z)
 @test Z_U.X[N] == Z_L.X[N] == xf
 @test Z_U.U[N] == Z_U.U[N-1]
 
-# Test solve
-# for i = 1:10
-#     dircol = solve!(prob, opts)
-#     # if dircol.stats[:info] == :Solve_Succeeded
-#     #     break
-#     # end
-#     # if i == 10
-#     #     # error("The problem should have solved successfully")
-#     # end
-# end
-
-# dircol = solve!(prob, opts)
-# @test_nowarn TO.write_ipopt_options()
+@test_nowarn solve!(prob, opts)
+@test_nowarn TO.write_ipopt_options()

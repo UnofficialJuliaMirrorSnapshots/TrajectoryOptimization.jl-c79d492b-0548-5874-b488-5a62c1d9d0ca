@@ -115,12 +115,12 @@ AugmentedLagrangianSolver(prob::Problem{T},
 Form an augmented Lagrangian cost function from a Problem and AugmentedLagrangianSolver.
     Does not allocate new memory for the internal arrays, but points to the arrays in the solver.
 """
-function AbstractSolver(prob::Problem{T}, opts::AugmentedLagrangianSolverOptions{T}) where T
+function AbstractSolver(prob::Problem{T,D}, opts::AugmentedLagrangianSolverOptions{T}) where {T<:AbstractFloat,D<:DynamicsType}
     # check for conflicting convergence criteria between unconstrained solver and AL: warn
 
     # Init solver statistics
     stats = Dict{Symbol,Any}(:iterations=>0,:iterations_total=>0,
-        :iterations_inner=>Int[],:cost=>T[],:c_max=>T[])
+        :iterations_inner=>Int[],:cost=>T[],:c_max=>T[],:penalty_max=>[])
     stats_uncon = Dict{Symbol,Any}[]
 
     # Init solver results
@@ -159,6 +159,8 @@ function init_constraint_trajectories(constraints::Constraints,n::Int,m::Int,N::
 
     return C,∇C,λ,μ,active_set
 end
+AugmentedLagrangianSolver(prob::Problem, opts::AugmentedLagrangianSolverOptions) =
+    AbstractSolver(prob, opts)
 
 function reset!(solver::AugmentedLagrangianSolver{T}) where T
     solver.stats[:iterations]       = 0
@@ -166,6 +168,7 @@ function reset!(solver::AugmentedLagrangianSolver{T}) where T
     solver.stats[:iterations_inner] = T[]
     solver.stats[:cost]             = T[]
     solver.stats[:c_max]            = T[]
+    solver.stats[:penalty_max]      = T[]
     n,m,N = get_sizes(solver)
     for k = 1:N
         solver.λ[k] .*= 0
