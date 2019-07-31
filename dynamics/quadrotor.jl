@@ -1,4 +1,3 @@
-
 quad_params = (m=0.5,
              J=SMatrix{3,3}(Diagonal([0.0023, 0.0023, 0.004])),
              Jinv=SMatrix{3,3}(Diagonal(1.0./[0.0023, 0.0023, 0.004])),
@@ -71,4 +70,4 @@ function quadrotor_dynamics!(ẋ::AbstractVector,x::AbstractVector,u::AbstractVe
       return tau, omega, J, Jinv
 end
 
-quadrotor_model = Model(quadrotor_dynamics!, 13, 4, quad_params)
+quadrotor = Model(quadrotor_dynamics!, 13, 4, quad_params)

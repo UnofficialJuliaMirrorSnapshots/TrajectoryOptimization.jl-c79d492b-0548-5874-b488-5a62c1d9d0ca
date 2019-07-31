@@ -1,4 +1,4 @@
-using BenchmarkTools, Plots, SNOPT7
+using BenchmarkTools, Plots, SNOPT7, Ipopt
 
 T = Float64
 
@@ -27,15 +27,19 @@ opts_altro = ALTROSolverOptions{T}(verbose=verbose,
     opts_pn=opts_pn)
 
 opts_ipopt = DIRCOLSolverOptions{T}(verbose=verbose,
-    nlp=:Ipopt,
+    nlp=Ipopt.Optimizer(),
     feasibility_tolerance=max_con_viol)
 
 opts_snopt = DIRCOLSolverOptions{T}(verbose=verbose,
-    nlp=:SNOPT7,
+    nlp=SNOPT7.Optimizer(),
     feasibility_tolerance=max_con_viol)
 
+# iLQR
+prob_ilqr = copy(Problems.pendulum)
+@time p0, s0 = solve(prob_ilqr, opts_ilqr)
+
 # ALTRO w/ Newton
-prob_altro = copy(Problems.pendulum_problem)
+prob_altro = copy(Problems.pendulum)
 @time p1, s1 = solve(prob_altro, opts_altro)
 @benchmark p1, s1 = solve($prob_altro, $opts_altro)
 max_violation_direct(p1)
@@ -43,9 +47,9 @@ plot(p1.X,title="Pendulum state (ALTRO)")
 plot(p1.U,title="Pendulum control (ALTRO)")
 
 # DIRCOL w/ Ipopt
-prob_ipopt = copy(Problems.pendulum_problem)
+prob_ipopt = copy(Problems.pendulum)
 rollout!(prob_ipopt)
-prob_ipopt = update_problem(prob_ipopt,model=Dynamics.pendulum_model) # get continuous time model
+prob_ipopt = update_problem(prob_ipopt,model=Dynamics.pendulum) # get continuous time model
 @time p2, s2 = solve(prob_ipopt, opts_ipopt)
 @benchmark p2, s2 = solve($prob_ipopt, $opts_ipopt)
 max_violation_direct(p2)
@@ -53,9 +57,9 @@ plot(p2.X,title="Pendulum state (Ipopt)")
 plot(p2.U,title="Pendulum control (Ipopt)")
 
 # DIRCOL w/ SNOPT
-prob_snopt = copy(Problems.pendulum_problem)
+prob_snopt = copy(Problems.pendulum)
 rollout!(prob_snopt)
-prob_snopt = update_problem(prob_snopt,model=Dynamics.pendulum_model) # get continuous time model
+prob_snopt = update_problem(prob_snopt,model=Dynamics.pendulum) # get continuous time model
 @time p3, s3 = solve(prob_snopt, opts_snopt)
 @benchmark p3, s3 = solve($prob_snopt, $opts_snopt)
 max_violation_direct(p3)
@@ -78,7 +82,7 @@ opts_altro_mt = ALTROSolverOptions{T}(verbose=verbose,
     dt_min=dt_min)
 
 opts_ipopt_mt = DIRCOLSolverMTOptions{T}(verbose=verbose,
-    nlp=:Ipopt,
+    nlp=Ipopt.Optimizer(),
     opts=Dict(:print_level=>3,
         :tol=>max_con_viol,
         :constr_viol_tol=>max_con_viol),
@@ -87,7 +91,7 @@ opts_ipopt_mt = DIRCOLSolverMTOptions{T}(verbose=verbose,
     h_min=dt_min)
 
 opts_snopt_mt = DIRCOLSolverMTOptions{T}(verbose=verbose,
-    nlp=:SNOPT7,
+    nlp=SNOPT7.Optimizer(),
     opts=Dict(:Major_print_level=>0,
         :Minor_print_level=>0,
         :Major_optimality_tolerance=>max_con_viol,
@@ -98,7 +102,7 @@ opts_snopt_mt = DIRCOLSolverMTOptions{T}(verbose=verbose,
     h_min=dt_min)
 
 # ALTRO w/ Newton
-prob_altro_mt = update_problem(copy(Problems.pendulum_problem),dt=dt,tf=0.)
+prob_altro_mt = update_problem(copy(Problems.pendulum),dt=dt,tf=0.)
 @time p4, s4 = solve(prob_altro_mt, opts_altro_mt)
 @benchmark p4, s4 = solve($prob_altro_mt, $opts_altro_mt)
 max_violation_direct(p4)
@@ -107,9 +111,9 @@ plot(p4.X,title="Pendulum state (Min. Time) (ALTRO)")
 plot(p4.U,title="Pendulum control (Min. Time) (ALTRO)")
 
 # DIRCOL w/ Ipopt
-prob_ipopt_mt = copy(Problems.pendulum_problem)
+prob_ipopt_mt = copy(Problems.pendulum)
 rollout!(prob_ipopt_mt)
-prob_ipopt_mt = update_problem(prob_ipopt_mt,model=Dynamics.pendulum_model,dt=dt,tf=0.) # get continuous time model
+prob_ipopt_mt = update_problem(prob_ipopt_mt,model=Dynamics.pendulum,dt=dt,tf=0.) # get continuous time model
 @time p5, s5 = solve(prob_ipopt_mt, opts_ipopt_mt)
 @benchmark p5, s5 = solve($prob_ipopt_mt, $opts_ipopt_mt)
 max_violation_direct(p5)
@@ -119,9 +123,9 @@ plot(p5.X,title="Pendulum state (Min. Time) (Ipopt)")
 plot(U5',title="Pendulum control (Min. Time) (Ipopt)")
 
 # DIRCOL w/ SNOPT
-prob_snopt_mt = copy(Problems.pendulum_problem)
+prob_snopt_mt = copy(Problems.pendulum)
 rollout!(prob_snopt_mt)
-prob_snopt_mt = update_problem(prob_snopt_mt,model=Dynamics.pendulum_model,dt=dt,tf=0.) # get continuous time model
+prob_snopt_mt = update_problem(prob_snopt_mt,model=Dynamics.pendulum,dt=dt,tf=0.) # get continuous time model
 @time p6, s6 = solve(prob_snopt_mt, opts_snopt_mt)
 @benchmark p6, s6 = solve($prob_snopt_mt, $opts_snopt_mt)
 max_violation_direct(p6)

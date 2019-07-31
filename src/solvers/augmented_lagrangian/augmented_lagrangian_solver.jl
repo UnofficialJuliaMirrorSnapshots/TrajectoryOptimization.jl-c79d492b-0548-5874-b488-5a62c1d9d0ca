@@ -105,6 +105,8 @@ struct AugmentedLagrangianSolver{T} <: AbstractSolver{T}
     λ::PartedVecTrajectory{T}      # Lagrange multipliers [(p,N-1) (p_N)]
     μ::PartedVecTrajectory{T}     # Penalty matrix [(p,p,N-1) (p_N,p_N)]
     active_set::PartedVecTrajectory{Bool} # active set [(p,N-1) (p_N)]
+
+    solver_uncon::AbstractSolver
 end
 
 AugmentedLagrangianSolver(prob::Problem{T},
@@ -119,8 +121,11 @@ function AbstractSolver(prob::Problem{T,D}, opts::AugmentedLagrangianSolverOptio
     # check for conflicting convergence criteria between unconstrained solver and AL: warn
 
     # Init solver statistics
+    to = TimerOutput()
+    reset_timer!(to)
     stats = Dict{Symbol,Any}(:iterations=>0,:iterations_total=>0,
-        :iterations_inner=>Int[],:cost=>T[],:c_max=>T[],:penalty_max=>[])
+        :iterations_inner=>Int[],:cost=>T[],:c_max=>T[],:penalty_max=>[],
+        :timer=>to)
     stats_uncon = Dict{Symbol,Any}[]
 
     # Init solver results
@@ -128,7 +133,10 @@ function AbstractSolver(prob::Problem{T,D}, opts::AugmentedLagrangianSolverOptio
 
     C,∇C,λ,μ,active_set = init_constraint_trajectories(prob.constraints,n,m,N)
 
-    AugmentedLagrangianSolver{T}(opts,stats,stats_uncon,C,copy(C),∇C,λ,μ,active_set)
+    solver_uncon = AbstractSolver(prob,opts.opts_uncon)
+    solver_uncon.stats[:timer] = to
+
+    AugmentedLagrangianSolver{T}(opts,stats,stats_uncon,C,copy(C),∇C,λ,μ,active_set,solver_uncon)
 end
 
 

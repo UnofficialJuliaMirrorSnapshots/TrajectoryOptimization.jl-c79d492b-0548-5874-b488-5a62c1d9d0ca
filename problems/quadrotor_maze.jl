@@ -2,7 +2,7 @@
 T = Float64
 
 # model
-model = Dynamics.quadrotor_model
+model = Dynamics.quadrotor
 model_d = rk3(model)
 n = model.n; m = model.m
 q0 = [1.;0.;0.;0.] # unit quaternion
@@ -101,8 +101,8 @@ for k = 2:N-1
 end
 constraints[N] += bnd_xf
 
-quadrotor_maze_problem = Problem(model_d, obj, constraints=constraints, x0=x0, xf=xf, N=N, dt=dt)
-initial_controls!(quadrotor_maze_problem,U_hover); # initialize problem with controls
+quadrotor_maze = Problem(model_d, obj, constraints=constraints, x0=x0, xf=xf, N=N, dt=dt)
+initial_controls!(quadrotor_maze,U_hover); # initialize problem with controls
 
 X_guess = zeros(n,7)
 X_guess[:,1] = x0
@@ -111,6 +111,6 @@ X_guess[1:3,2:6] .= [0 -12.5 -20 -12.5 0 ;15 20 30 40 45 ;10 10 10 10 10]
 
 X_guess[4:7,:] .= q0
 X0 = interp_rows(N,tf,X_guess);
-copyto!(quadrotor_maze_problem.X,X0)
+copyto!(quadrotor_maze.X,X0)
 
 quadrotor_maze_objects = maze_cylinders

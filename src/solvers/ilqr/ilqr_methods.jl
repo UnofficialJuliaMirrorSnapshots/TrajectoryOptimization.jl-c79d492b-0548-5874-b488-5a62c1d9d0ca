@@ -1,7 +1,8 @@
 # Generic solve methods
 "iLQR solve method"
-function solve!(prob::Problem{T}, solver::iLQRSolver{T}) where T<:AbstractFloat
+function solve!(prob::Problem{T,Discrete}, solver::iLQRSolver{T}) where T<:AbstractFloat
     reset!(solver)
+    to = solver.stats[:timer]
 
     n,m,N = size(prob)
     J = Inf
@@ -13,19 +14,23 @@ function solve!(prob::Problem{T}, solver::iLQRSolver{T}) where T<:AbstractFloat
     live_plotting(prob,solver)
 
     J_prev = cost(prob.obj, prob.X, prob.U, get_dt_traj(prob))
-    push!(solver.stats[:cost], J_prev)
+
 
     with_logger(logger) do
+        record_iteration!(prob, solver, J_prev, Inf)
         for i = 1:solver.opts.iterations
             J = step!(prob, solver, J_prev)
 
             # check for cost blow up
             if J > solver.opts.max_cost_value
-                error("Cost exceeded maximum cost")
+                @warn "Cost exceeded maximum cost"
+                return solver
             end
 
-            copyto!(prob.X, solver.X̄)
-            copyto!(prob.U, solver.Ū)
+            @timeit to "copy" begin
+                copyto!(prob.X, solver.X̄)
+                copyto!(prob.U, solver.Ū)
+            end
 
             dJ = abs(J - J_prev)
             J_prev = copy(J)
@@ -33,17 +38,18 @@ function solve!(prob::Problem{T}, solver::iLQRSolver{T}) where T<:AbstractFloat
             live_plotting(prob,solver)
 
             println(logger, InnerLoop)
-            evaluate_convergence(solver) ? break : nothing
+            @timeit to "convergence" evaluate_convergence(solver) ? break : nothing
         end
     end
-    return solver 
+    return solver
 end
 
 function step!(prob::Problem{T}, solver::iLQRSolver{T}, J::T) where T
-    jacobian!(prob,solver)
-    cost_expansion!(prob,solver)
-    ΔV = backwardpass!(prob,solver)
-    forwardpass!(prob,solver,ΔV,J)
+    to = solver.stats[:timer]
+    @timeit to "jacobians" jacobian!(prob,solver)
+    @timeit to "cost expansion" cost_expansion!(prob,solver)
+    @timeit to "backward pass" ΔV = backwardpass!(prob,solver)
+    @timeit to "forward pass" forwardpass!(prob,solver,ΔV,J)
 end
 
 function cost_expansion!(prob::Problem{T},solver::iLQRSolver{T}) where T
@@ -83,8 +89,26 @@ function calculate_gradient(prob::Problem,solver::iLQRSolver)
         gradient = gradient_todorov(prob,solver)
     elseif solver.opts.gradient_type == :feedforward
         gradient = gradient_feedforward(solver)
+    elseif solver.opts.gradient_type == :ℓ2
+        gradient = norm(compute_gradient(prob,solver))
+    elseif solver.opts.gradient_type == :ℓinf
+        gradient = norm(compute_gradient(prob,solver),Inf)
     end
     return gradient
+end
+
+function compute_gradient(prob::Problem,solver::iLQRSolver)
+    N = prob.N
+    reset!(solver.Q)
+    cost_expansion!(solver.Q,prob.obj,prob.X,prob.U,get_dt_traj(prob))
+    ∇ℓ = []
+    for k = 1:N-1
+        push!(∇ℓ,solver.Q[k].x)
+        push!(∇ℓ,solver.Q[k].u)
+    end
+    push!(∇ℓ,solver.Q[N].x)
+
+    vcat(∇ℓ...)
 end
 
 """

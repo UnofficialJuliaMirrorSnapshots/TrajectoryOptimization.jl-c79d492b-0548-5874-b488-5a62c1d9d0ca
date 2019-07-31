@@ -2,7 +2,8 @@
 T = Float64
 
 # model
-model = Dynamics.quadrotor_model
+model = Dynamics.quadrotor
+# model = Dynamics.quadrotor_euler
 model_d = rk3(model)
 n = model.n; m = model.m
 q0 = [1.;0.;0.;0.] # unit quaternion
@@ -38,7 +39,6 @@ xf_no_quat_U[8:10] .= 0.
 xf_no_quat_L[8:10] .= 0.
 bnd_xf = BoundConstraint(n,m,x_min=xf_no_quat_L,x_max=xf_no_quat_U)
 
-
 N = 101 # number of knot points
 tf = 5.0
 dt = tf/(N-1) # total time
@@ -47,11 +47,11 @@ U_hover = [0.5*9.81/4.0*ones(m) for k = 1:N-1] # initial hovering control trajec
 obj = LQRObjective(Q, R, Qf, xf, N) # objective with same stagewise costs
 
 
-quadrotor_problem = Problem(model_d, obj, x0=x0, xf=xf, N=N, dt=dt)
-initial_controls!(quadrotor_problem,U_hover); # initialize problem with controls
+quadrotor = Problem(model_d, obj, x0=x0, xf=xf, N=N, dt=dt)
+initial_controls!(quadrotor,U_hover); # initialize problem with controls
 
-quadrotor_problem.constraints[1] += bnd3
+quadrotor.constraints[1] += bnd3
 for k = 2:N-1
-    quadrotor_problem.constraints[k] += bnd3
+    quadrotor.constraints[k] += bnd3
 end
-quadrotor_problem.constraints[N] += bnd_xf
+quadrotor.constraints[N] += bnd_xf

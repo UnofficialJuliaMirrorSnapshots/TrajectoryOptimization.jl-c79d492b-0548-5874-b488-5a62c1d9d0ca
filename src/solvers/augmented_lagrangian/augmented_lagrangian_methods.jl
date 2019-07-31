@@ -3,7 +3,7 @@ function solve!(prob::Problem{T,Discrete}, solver::AugmentedLagrangianSolver{T})
     reset!(solver)
     t_start = time()
 
-    solver_uncon = AbstractSolver(prob, solver.opts.opts_uncon)
+    solver_uncon = solver.solver_uncon
 
     prob_al = AugmentedLagrangianProblem(prob, solver)
     logger = default_logger(solver)
@@ -52,14 +52,15 @@ end
 "Augmented Lagrangian step"
 function step!(prob::Problem{T}, solver::AugmentedLagrangianSolver{T},
         unconstrained_solver::AbstractSolver) where T
+    to = solver.stats[:timer]
 
     # Solve the unconstrained problem
-    solve!(prob, unconstrained_solver)
-    J = cost(prob)
+    @timeit to "uncon solve" solve!(prob, unconstrained_solver)
+    @timeit to "cost" J = cost(prob)
 
     # Outer loop update
-    dual_update!(prob, solver)
-    penalty_update!(prob, solver)
+    @timeit to "dual update" dual_update!(prob, solver)
+    @timeit to "penalty update" penalty_update!(prob, solver)
     copyto!(solver.C_prev,solver.C)
 
     return J
@@ -85,7 +86,7 @@ function record_iteration!(prob::Problem{T}, solver::AugmentedLagrangianSolver{T
     push!(solver.stats[:cost],J)
     push!(solver.stats[:c_max],c_max)
     push!(solver.stats[:penalty_max],max_penalty(solver))
-    push!(solver.stats_uncon, unconstrained_solver.stats)
+    push!(solver.stats_uncon, copy(unconstrained_solver.stats))
 
     @logmsg OuterLoop :iter value=solver.stats[:iterations]
     @logmsg OuterLoop :total value=solver.stats[:iterations_total]

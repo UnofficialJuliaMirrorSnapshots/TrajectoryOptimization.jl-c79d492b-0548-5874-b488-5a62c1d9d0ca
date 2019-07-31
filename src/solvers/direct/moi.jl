@@ -1,4 +1,3 @@
-using MathOptInterface
 const MOI = MathOptInterface
 
 struct DIRCOLProblem{T} <: MOI.AbstractNLPEvaluator
@@ -81,6 +80,7 @@ end
 MOI.eval_hessian_lagrangian(::DIRCOLProblem, H, x, σ, μ) = nothing
 
 function solve_moi(prob::Problem, opts::DIRCOLSolverOptions)
+
     prob = copy(prob)
     bnds = remove_bounds!(prob)
     z_U, z_L, g_U, g_L = get_bounds(prob, bnds)
@@ -97,7 +97,7 @@ function solve_moi(prob::Problem, opts::DIRCOLSolverOptions)
     nlp_bounds = MOI.NLPBoundsPair.(g_L, g_U)
     block_data = MOI.NLPBlockData(nlp_bounds, d, has_objective)
 
-    solver = eval(opts.nlp).Optimizer(;nlp_options(opts)...)
+    solver = typeof(opts.nlp)(;nlp_options(opts)...)
     Z = MOI.add_variables(solver, NN)
 
     # Add bound constraints
@@ -109,7 +109,7 @@ function solve_moi(prob::Problem, opts::DIRCOLSolverOptions)
     end
 
     # Solve the problem
-    @info "DIRCOL solve using " * String(opts.nlp)
+    @info "DIRCOL solve using " * String(optimizer_name(solver))
     MOI.set(solver, MOI.NLPBlock(), block_data)
     MOI.set(solver, MOI.ObjectiveSense(), MOI.MIN_SENSE)
 
@@ -120,8 +120,12 @@ function solve_moi(prob::Problem, opts::DIRCOLSolverOptions)
     MOI.optimize!(solver)
     d.solver.stats[:time] = time() - t0
 
-    d.solver.stats[:iter_time] .-= d.solver.stats[:iter_time][2]
-    deleteat!(d.solver.stats[:iter_time],1)
+    if length(d.solver.stats[:iter_time]) > 2
+        d.solver.stats[:iter_time] .-= d.solver.stats[:iter_time][2]
+        deleteat!(d.solver.stats[:iter_time],1)
+    else
+        @warn "Possible issue with c_max logging"
+    end
 
     # Get the solution
     res = MOI.get(solver, MOI.VariablePrimal(), Z)
@@ -143,7 +147,9 @@ function max_violation_dircol(d::DIRCOLProblem, Z, g)
     return max_viol
 end
 
-function solve!(prob::Problem,opts::DIRCOLSolverOptions)
+solve!(prob::Problem{T,Continuous}, solver::DIRCOLSolver) where T<:AbstractFloat = solve!(prob, solver.opts)
+
+function solve!(prob::Problem{T,Continuous}, opts::DIRCOLSolverOptions) where T<:AbstractFloat
 
     dircol = solve_moi(prob, opts)
 
@@ -153,14 +159,25 @@ function solve!(prob::Problem,opts::DIRCOLSolverOptions)
     return dircol
 end
 
+solve(prob::Problem{T,Discrete}, solver::DIRCOLSolver) where T<:AbstractFloat = solve(prob, solver.opts)
+
+function solve(prob::Problem{T,Discrete}, opts::DIRCOLSolverOptions) where T<:AbstractFloat
+    prob0 = copy(prob)
+    rollout!(prob0)
+    prob_c = continuous(prob0)
+    solver = solve!(prob_c, opts)
+    return prob_c, solver
+end
+
 function nlp_options(opts::DIRCOLSolverOptions)
-    if opts.nlp == :Ipopt
+    solver_name = optimizer_name(opts.nlp)
+    if solver_name == :Ipopt
         !opts.verbose ? opts.opts[:print_level] = 0 : nothing
         if opts.feasibility_tolerance > 0.
             opts.opts[:constr_viol_tol] = opts.feasibility_tolerance
             opts.opts[:tol] = opts.feasibility_tolerance
         end
-    elseif opts.nlp == :SNOPT7
+    elseif solver_name == :SNOPT7
         if !opts.verbose
             opts.opts[:Major_print_level] = 0
             opts.opts[:Minor_print_level] = 0
@@ -175,4 +192,8 @@ function nlp_options(opts::DIRCOLSolverOptions)
     end
 
     return opts.opts
+end
+
+function optimizer_name(optimizer::MathOptInterface.AbstractOptimizer)
+    nameof(parentmodule(typeof(optimizer)))
 end
